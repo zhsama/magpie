@@ -11,7 +11,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 )
 
-const label = "com.yetone.magpie"
+const label = "com.zhsama.magpie"
 
 func record() string {
 	home, _ := os.UserHomeDir()

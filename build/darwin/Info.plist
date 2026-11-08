@@ -4,7 +4,7 @@
 <dict>
 	<key>CFBundleName</key><string>magpie</string>
 	<key>CFBundleDisplayName</key><string>magpie</string>
-	<key>CFBundleIdentifier</key><string>com.yetone.magpie</string>
+	<key>CFBundleIdentifier</key><string>com.zhsama.magpie</string>
 	<key>CFBundleExecutable</key><string>magpie</string>
 	<key>CFBundleIconFile</key><string>magpie</string>
 	<key>CFBundleIconName</key><string>AppIcon</string>
@@ -17,7 +17,7 @@
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
-			<key>CFBundleURLName</key><string>com.yetone.magpie.import</string>
+			<key>CFBundleURLName</key><string>com.zhsama.magpie.import</string>
 			<key>CFBundleURLSchemes</key><array><string>magpie</string></array>
 		</dict>
 	</array>
