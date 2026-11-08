@@ -114,7 +114,7 @@ func SignInServer(ctx context.Context, name string) (mcpauth.State, error) {
 	}
 	var app *mcpauth.App
 	if s.OAuth != nil {
-		app = &mcpauth.App{ClientID: s.OAuth.ClientID, ClientSecret: s.OAuth.ClientSecret, CallbackPort: s.OAuth.CallbackPort}
+		app = &mcpauth.App{ClientID: s.OAuth.ClientID, ClientSecret: s.OAuth.ClientSecret, CallbackPort: s.OAuth.CallbackPort, ClientName: s.OAuth.ClientName}
 	}
 	return mcpauth.StartWith(ctx, s.Name, s.URL, app)
 }
