@@ -1,0 +1,54 @@
+name: macOS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    name: magpie.app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: personal
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # A clean vX.Y.Z is a release, and a release installs the official app.
+      # v0.0.0-0-g<sha> is the shape update.Released rejects.
+      - name: Version
+        id: version
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse --short=7 HEAD)
+          echo "version=v0.0.0-0-g${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: make app VERSION="${{ steps.version.outputs.version }}"
+
+      - name: Check the build
+        run: |
+          set -euo pipefail
+          bin=magpie.app/Contents/MacOS/magpie
+          if strings -a "$bin" | grep -q phc_nyDy; then
+            echo "posthog key is linked" >&2
+            exit 1
+          fi
+          id=$(plutil -extract CFBundleIdentifier raw magpie.app/Contents/Info.plist)
+          test "$id" = "com.zhsama.magpie"
+          got=$(plutil -extract CFBundleShortVersionString raw magpie.app/Contents/Info.plist)
+          test "$got" = "${{ steps.version.outputs.version }}"
+
+      - name: Zip
+        run: ditto -c -k --keepParent magpie.app "magpie-macos.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: magpie-macos
+          path: magpie-macos.zip
+          if-no-files-found: error
