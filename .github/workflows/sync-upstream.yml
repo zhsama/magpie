@@ -1,0 +1,61 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # Monday 09:00 JST
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Merge upstream
+        id: sync
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/yetone/magpie.git
+          git fetch upstream main
+          git fetch origin personal
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          merge_branch() {
+            local branch="$1"
+            local flag="$2"
+            git checkout -B "$branch" "origin/$branch"
+            if git merge-base --is-ancestor upstream/main HEAD; then
+              echo "${branch} is current"
+              echo "${flag}=false" >> "$GITHUB_OUTPUT"
+              return 0
+            fi
+            if ! git merge --no-edit -m "merge upstream main" upstream/main; then
+              echo "conflict merging upstream/main into ${branch}" >&2
+              git diff --name-only --diff-filter=U >&2
+              exit 1
+            fi
+            git push origin "HEAD:${branch}"
+            echo "${flag}=true" >> "$GITHUB_OUTPUT"
+          }
+
+          merge_branch main main_updated
+          merge_branch personal personal_updated
+
+      - name: Build macOS app
+        if: steps.sync.outputs.personal_updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run macos.yml --ref personal
