@@ -144,7 +144,7 @@ func TestDaemonStatusPrintsPage(t *testing.T) {
 	file := filepath.Join(home, ".config", "systemd", "user", "magpie.service")
 	text := "ExecStart=\"/usr/bin/magpie\" serve \"--web=0.0.0.0:3430\"\nEnvironment=\"MAGPIE_WEB_KEY=" + key + "\"\n"
 	if runtime.GOOS == "darwin" {
-		file = filepath.Join(home, "Library", "LaunchAgents", "com.yetone.magpie.serve.plist")
+		file = filepath.Join(home, "Library", "LaunchAgents", "com.zhsama.magpie.serve.plist")
 		text = "<array><string>/usr/bin/magpie</string><string>serve</string><string>--web=0.0.0.0:3430</string></array>\n<key>MAGPIE_WEB_KEY</key><string>" + key + "</string>\n"
 	}
 	os.MkdirAll(filepath.Dir(file), 0o755)

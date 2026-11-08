@@ -248,14 +248,14 @@ func TestLaunchdInstall(t *testing.T) {
 	if err := Install(Options{}); err != nil {
 		t.Fatal(err)
 	}
-	file := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", "com.yetone.magpie.serve.plist")
+	file := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", "com.zhsama.magpie.serve.plist")
 	b, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := string(b)
 	for _, want := range []string{
-		"<key>Label</key><string>com.yetone.magpie.serve</string>",
+		"<key>Label</key><string>com.zhsama.magpie.serve</string>",
 		"<array><string>/opt/my magpie/magpie%1</string><string>serve</string></array>",
 		"<key>SuccessfulExit</key><false/>",
 		"<key>HTTP_PROXY</key><string>http://a&amp;b&lt;c&gt;@proxy</string>",
@@ -275,14 +275,14 @@ func TestLaunchdInstall(t *testing.T) {
 	}
 	uid := strconv.Itoa(os.Getuid())
 	got := strings.Join(calls(t, log), "\n")
-	want := "launchctl print gui/" + uid + "/com.yetone.magpie.serve\nlaunchctl bootstrap gui/" + uid + " " + file
+	want := "launchctl print gui/" + uid + "/com.zhsama.magpie.serve\nlaunchctl bootstrap gui/" + uid + " " + file
 	if got != want {
 		t.Errorf("install ran\n%s\nwant\n%s", got, want)
 	}
 
 	// loaded: install again takes it out first; restart kills and starts
 	os.Remove(filepath.Join(dir, "launchctl.print.fail"))
-	write(t, filepath.Join(dir, "launchctl.print.out"), "gui/501/com.yetone.magpie.serve = {\n\tactive count = 1\n\tstate = running\n\tprogram = /opt/magpie\n\tpid = 777\n\tlast exit code = (never exited)\n\tendpoints = {\n\t\tstate = active\n\t}\n}\n")
+	write(t, filepath.Join(dir, "launchctl.print.out"), "gui/501/com.zhsama.magpie.serve = {\n\tactive count = 1\n\tstate = running\n\tprogram = /opt/magpie\n\tpid = 777\n\tlast exit code = (never exited)\n\tendpoints = {\n\t\tstate = active\n\t}\n}\n")
 	os.Remove(log)
 	if err := Install(Options{}); err != nil {
 		t.Fatal(err)
@@ -291,7 +291,7 @@ func TestLaunchdInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = strings.Join(calls(t, log), "\n")
-	svc := "gui/" + uid + "/com.yetone.magpie.serve"
+	svc := "gui/" + uid + "/com.zhsama.magpie.serve"
 	want = "launchctl print " + svc + "\nlaunchctl bootout " + svc + "\nlaunchctl bootstrap gui/" + uid + " " + file + "\nlaunchctl print " + svc + "\nlaunchctl kickstart -k " + svc
 	if got != want {
 		t.Errorf("reinstall and restart ran\n%s\nwant\n%s", got, want)
@@ -445,7 +445,7 @@ func TestInstallWithWeb(t *testing.T) {
 			return filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "systemd", "user", "magpie.service")
 		}, "ExecStart=\"/opt/my magpie/magpie%%1\" serve \"--web=0.0.0.0:3430\"\n", "Environment=\"MAGPIE_WEB_KEY=" + key + "\"\n"},
 		{"darwin", func() string {
-			return filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", "com.yetone.magpie.serve.plist")
+			return filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", "com.zhsama.magpie.serve.plist")
 		}, "<array><string>/opt/my magpie/magpie%1</string><string>serve</string><string>--web=0.0.0.0:3430</string></array>", "<key>MAGPIE_WEB_KEY</key><string>" + key + "</string>"},
 	} {
 		t.Run(c.goos, func(t *testing.T) {

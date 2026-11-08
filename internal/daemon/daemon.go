@@ -25,7 +25,6 @@ import (
 	"github.com/yetone/magpie/internal/proc"
 )
 
-// Name is the service's name: magpie.service, com.yetone.magpie.serve.
 const Name = "magpie"
 
 // Status is what the system says of the service.

@@ -13,7 +13,7 @@ const olderPlist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Label</key><string>com.yetone.magpie</string>
+	<key>Label</key><string>com.zhsama.magpie</string>
 	<key>ProgramArguments</key>
 	<array><string>/Applications/Tom &amp; Jerry/magpie.app/Contents/MacOS/magpie</string><string>tray</string></array>
 	<key>RunAtLoad</key><true/>
@@ -122,9 +122,9 @@ func TestLaunchAgentNamesItsApp(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	exe := fakeApp(t, home, "com.yetone.magpie")
+	exe := fakeApp(t, home, "com.zhsama.magpie")
 
-	key := "<key>AssociatedBundleIdentifiers</key>\n\t<array><string>com.yetone.magpie</string></array>"
+	key := "<key>AssociatedBundleIdentifiers</key>\n\t<array><string>com.zhsama.magpie</string></array>"
 	if b := string(plist(exe)); !strings.Contains(b, key) {
 		t.Fatalf("the launch agent doesn't name magpie's app:\n%s", b)
 	}
@@ -146,7 +146,7 @@ func TestLaunchAgentNamesItsApp(t *testing.T) {
 		t.Fatalf("not a valid plist: %s", out)
 	}
 	out, err := exec.Command("plutil", "-extract", "AssociatedBundleIdentifiers.0", "raw", p).CombinedOutput()
-	if err != nil || strings.TrimSpace(string(out)) != "com.yetone.magpie" {
+	if err != nil || strings.TrimSpace(string(out)) != "com.zhsama.magpie" {
 		t.Fatalf("plutil reads AssociatedBundleIdentifiers as %q (%v)", out, err)
 	}
 
@@ -253,7 +253,7 @@ func TestEnabledFollowsTheSystemsSwitch(t *testing.T) {
 }
 
 // The system's switch is kept by the launch agent's label, wherever its
-// plist is: a test's record under a sandbox home is com.yetone.magpie
+// plist is: a test's record under a sandbox home is com.zhsama.magpie
 // too, and the system would answer for the user's own. The tests ask a
 // stand-in that knows nothing; askSystem is the real question.
 var askSystem func(string) int
@@ -273,8 +273,8 @@ func TestLegacyStatusAsksTheSystem(t *testing.T) {
 		t.Skip("no sw_vers")
 	}
 	dir := t.TempDir()
-	p := filepath.Join(dir, "com.yetone.magpie-test.plist")
-	b := strings.Replace(string(plist("/usr/bin/true")), "<string>"+label+"</string>", "<string>com.yetone.magpie-test-"+filepath.Base(dir)+"</string>", 1)
+	p := filepath.Join(dir, "com.zhsama.magpie-test.plist")
+	b := strings.Replace(string(plist("/usr/bin/true")), "<string>"+label+"</string>", "<string>com.zhsama.magpie-test-"+filepath.Base(dir)+"</string>", 1)
 	if err := os.WriteFile(p, []byte(b), 0o644); err != nil {
 		t.Fatal(err)
 	}
