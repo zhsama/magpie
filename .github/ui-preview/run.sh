@@ -23,6 +23,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 trap 'kill "${web:-}" "${mock:-}" 2>/dev/null || true' EXIT
 
+if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+  echo "run.sh: no DEEPSEEK_API_KEY, skip"
+  exit 0
+fi
 : "${DEEPSEEK_API_KEY:?}"
 echo "::add-mask::$DEEPSEEK_API_KEY"
 
