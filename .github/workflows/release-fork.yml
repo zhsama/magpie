@@ -110,6 +110,10 @@ jobs:
     needs: [cli, docker]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: personal
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
