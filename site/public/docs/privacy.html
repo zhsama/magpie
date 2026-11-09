@@ -55,6 +55,13 @@
     <a class="toc-only" href="/docs/masking">Privacy masking</a>
     <a class="toc-only" href="/docs/mcp-router">MCP router</a>
     <a class="toc-only" href="/docs/library">Library</a>
+    <a class="toc-only" href="/docs/claude-code-models">Models in Claude Code</a>
+    <a class="toc-only" href="/docs/codex-models">Models in Codex</a>
+    <a class="toc-only" href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a class="toc-only" href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a class="toc-only" href="/docs/local-models">Local models</a>
+    <a class="toc-only" href="/docs/opencode-models">Models in OpenCode</a>
+    <a class="toc-only" href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
@@ -178,6 +185,7 @@
     <p>magpie asks its own site for a few things, whatever the privacy settings say, as any app asks its update server. None of these requests carries the install id or an account.</p>
     <ul>
       <li><code>/api/latest</code>: the update feed, every 6 hours unless <code>noAutoUpdate</code> is on, with <code>?lang=</code> for the notes in your language, and <code>?channel=stable</code> when <span class="ui">Settings</span> → <span class="ui">About</span> → <span class="ui">Update channel</span> is Stable. Neither says who you are. <code>/api/notes</code> gives What’s new after an update.</li>
+      <li><code>/files/&lt;version&gt;/&lt;file&gt;</code>: the release files an update and the installer download, served from Cloudflare R2. A file the site doesn’t hold is sent on to github.com. Nothing is counted.</li>
       <li><code>/api/partners</code>: the add sheet’s partner list, every 6 hours. One fetch in ten is counted as a <code>magpie partners fetch</code> event, with the country Cloudflare gives, while a partner is listed.</li>
       <li><code>/go/&lt;partner&gt;/site</code> and <code>/go/&lt;partner&gt;/keys</code>: a partner’s website and key-page links, opened in your browser, are counted (the partner, which link, a region, a country) as <code>magpie partner go</code> before you are sent on.</li>
       <li><code>/api/icon?url=…</code>: icons named by a plugin, an import link or the library are fetched through it, so their hosts see Cloudflare’s address, not yours. The worker passes the picture on and counts and keeps nothing.</li>
@@ -224,6 +232,13 @@
     <a href="/docs/masking">Privacy masking</a>
     <a href="/docs/mcp-router">MCP router</a>
     <a href="/docs/library">Library</a>
+    <a href="/docs/claude-code-models">Models in Claude Code</a>
+    <a href="/docs/codex-models">Models in Codex</a>
+    <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a href="/docs/local-models">Local models</a>
+    <a href="/docs/opencode-models">Models in OpenCode</a>
+    <a href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

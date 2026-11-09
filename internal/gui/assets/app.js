@@ -7173,12 +7173,15 @@ function pickForAgent(a, p, btn, ev) {
 }
 
 // shinePartners: a hairline of light runs once round the Partners heading
-// when the sheet opens, as the reader reaches it (the owner picked it, of
-// three). Once an opening: a search or a reload drawing it again doesn't.
-function shinePartners(k) {
+// and, at the same time, round its tiles, when the sheet opens, as the
+// reader reaches it (the owner picked it, of three; 标题跟这一块要一起播放).
+// Once an opening: a search or a reload drawing it again doesn't.
+function shinePartners(k, grid) {
   if (partnersShone || calm()) return;
-  k.classList.add("shine");
-  k.append(el("i", "glow"), el("i", "ring"));
+  for (const x of [k, grid]) {
+    x.classList.add("shine");
+    x.append(el("i", "glow"), el("i", "ring"));
+  }
   const seen = new IntersectionObserver(([en]) => {
     // a redraw's new heading takes over from this one
     if (!k.isConnected) return seen.disconnect();
@@ -7187,6 +7190,7 @@ function shinePartners(k) {
     if (partnersShone) return;
     partnersShone = true;
     k.classList.add("lit");
+    grid.classList.add("lit");
   }, { root: $("#view-providers"), threshold: 1 });
   seen.observe(k);
 }
@@ -7270,7 +7274,7 @@ function renderAdd() {
     if (partners.length) {
       any = true;
       const grid = section("Partners", "magpie's sponsors");
-      shinePartners(grid.previousElementSibling);
+      shinePartners(grid.previousElementSibling, grid);
       // a new one's tile keeps a dot until opened (partnerTile)
       newPartnerTiles ??= new Set();
       for (const p of partners) if (p.new && !p.added) newPartnerTiles.add(p.id);
@@ -12045,7 +12049,7 @@ function mediaChips(cls, ids, key, p, names) {
 // renderRouting: spread over keys or accounts and stickiness, staged in
 // the draft and made with Save (01huadalang on Discord)
 const ROUTINGS = [
-  ["", "Smart", "The first takes requests while it has quota to spare; when it runs low, the one with the most left takes over. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again."],
+  ["", "Smart", "Of the accounts with quota to spare, the one whose quota renews soonest goes first, since what it has left is lost then; one not started yet renews last, so it waits, and keys go in their order. One at 90% waits until the others can't answer. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again."],
   ["order", "In order", "Requests go to the first; the next takes over when the one before runs out of quota, hits a rate limit or fails."],
   // dzxx0496 on Discord: free accounts one after another, the first not
   // taking the requests back once it renews (routes.Drain)
@@ -13245,10 +13249,17 @@ function renderAccounts(a, p) {
   // kept signed in to one (#524): the first is the order's
   const kept = keptLogin(p);
   const firstUser = kept ? ls.find((l) => (l.active || l.on) && !l.paused && !l.lapsed)?.user : ls.find((l) => l.active)?.user;
+  // Smart, Least used first and Weekly pace go by each account's quota and
+  // use the order only between those alike (docs/reference.md), so Make
+  // first says so there rather than that the gateway uses it first
+  // (CryptoSarom on X: a new account made first never got a request).
+  // Keys have no quota that renews, so Smart keeps them in their order.
+  const byQuota = p?.account && ["", "usage", "pace"].includes(p?.routing || "") ? ROUTINGS.find(([id]) => id === (p?.routing || ""))?.[1] : "";
+  const firstNote = (user) => t("{user} is first in the order; {routing} still goes by each account's quota, so the order only settles ties. In order uses the first first.", { user, routing: t(byQuota) });
   const makeFirst = (l) => {
     const b = el("button", "text", t("Make first"));
-    b.title = t("The gateway uses this account first; {agent} stays signed in to {user}", { agent: a.agentName, user: kept });
-    b.onclick = () => { b.classList.add("busy"); accountAction("provider/arrange", { id: p.id, accountOrder: [l.user, ...ls.filter((x) => x !== l).map((x) => x.user)] }, t("The gateway now uses {user} first", { user: l.user })); };
+    b.title = byQuota ? firstNote(l.user) : t("The gateway uses this account first; {agent} stays signed in to {user}", { agent: a.agentName, user: kept });
+    b.onclick = () => { b.classList.add("busy"); accountAction("provider/arrange", { id: p.id, accountOrder: [l.user, ...ls.filter((x) => x !== l).map((x) => x.user)] }, byQuota ? firstNote(l.user) : t("The gateway now uses {user} first", { user: l.user })); };
     return b;
   };
   // pausable while another is on (#263)
@@ -13369,8 +13380,8 @@ function renderAccounts(a, p) {
         line.append(forget, only);
       } else {
         const use = el("button", "text", on ? t("Make first") : t("Use"));
-        use.title = sub?.own ? t("The gateway uses this account first") : t("Sign {agent} in to this account", { agent: a.agentName });
-        use.onclick = () => { use.classList.add("busy"); accountAction("login/switch", { agent: a.agent, user: l.user }, sub?.own ? t("The gateway now uses {user} first", { user: l.user }) : t("{agent} is now signed in as {user}", { agent: a.agentName, user: l.user })); };
+        use.title = on && byQuota ? firstNote(l.user) : sub?.own ? t("The gateway uses this account first") : t("Sign {agent} in to this account", { agent: a.agentName });
+        use.onclick = () => { use.classList.add("busy"); accountAction("login/switch", { agent: a.agent, user: l.user }, on && byQuota ? (sub?.own ? "" : t("{agent} is now signed in as {user}", { agent: a.agentName, user: l.user }) + " ") + firstNote(l.user) : sub?.own ? t("The gateway now uses {user} first", { user: l.user }) : t("{agent} is now signed in as {user}", { agent: a.agentName, user: l.user })); };
         line.append(forget, use);
       }
     }
@@ -18290,23 +18301,8 @@ async function askReset(q) {
 window.askQuit = () => import("./quitask.js").then(() => askQuitSheet(), () => api("window/quit?now=1", {}));
 // closes a confirmation, nothing more (its Cancel, or an OK that only dismisses)
 function cancelAsk(e) { e.stopPropagation(); closeConfirmAsk(); }
-// THIRD_PARTY_NOTICES, which every build carries
-async function showNotices() {
-  let text;
-  try { text = (await api("notices")).text; } catch (e) { statusErr(e); return; }
-  const ed = el("div", "editor wide notices");
-  const head = el("div", "ehead");
-  head.append(el("b", "", t("Open-source licenses")));
-  const bar = el("div", "bar");
-  const ok = el("button", "text primary", t("Done"));
-  ok.onclick = cancelAsk;
-  bar.append(el("span", "grow"), ok);
-  ed.append(head, el("pre", "notices-text", text), bar);
-  confirmAsk = ed;
-  openModal(ed);
-  $("#modal").classList.add("lib");
-  ok.focus(NO_SCROLL);
-}
+// About's licenses (notices.js, loaded when opened)
+const showNotices = () => import("./notices.js").then(() => noticesSheet(), statusErr);
 function closeConfirmAsk() {
   if (!confirmAsk) return;
   // Escape and the backdrop must not expose row actions while a bulk write
@@ -19175,6 +19171,7 @@ function openSessCombo(anchor, all, opts, value, choose, head) {
   const list = el("div", "sc-list");
   box.append(top, list);
   let items = [];
+  const iconed = opts.some((o) => o.icon);
   const item = (o) => {
     const b = el("button", "pm-item" + (o.v === value ? " on" : ""));
     b.type = "button";
@@ -19185,7 +19182,8 @@ function openSessCombo(anchor, all, opts, value, choose, head) {
     const words = el("span", "pm-words");
     words.append(el("span", "pm-name", o.name), el("span", "pm-note", o.note));
     b.title = o.v;
-    b.append(tick, words);
+    // a menu of agents shows each one's icon; "All" keeps the room blank
+    b.append(tick, ...(iconed ? [o.icon ? icon(o.icon) : el("span", "ic")] : []), words);
     b.onclick = (e) => { e.stopPropagation(); closeProtoMenu(); choose(o.v); };
     hoverFocus(b);
     return b;
@@ -19842,10 +19840,11 @@ function renderCLI(r) {
 }
 
 // Settings' Download source (#893): where an update's file is downloaded
-// from — GitHub, or a GitHub download mirror put before its URL, the same
-// setting `magpie update mirror` writes. magpie names no mirror of its
-// own; the feed and each file's SHA-256 still come from usemagpie.ai, and a
-// file that doesn't match is never installed. A draft and its error are
+// from — usemagpie.ai (R2), and github.com when that fails, or a GitHub
+// download mirror put before github.com's URL, the same setting `magpie
+// update mirror` writes. magpie names no mirror of its own; the feed and
+// each file's SHA-256 still come from usemagpie.ai, and a file that doesn't
+// match is never installed. A draft and its error are
 // kept across the page being drawn again.
 let mirrorEditing = false, mirrorDraft = "", mirrorErr = "";
 function setUpdateMirror(mirror) {
@@ -19860,13 +19859,13 @@ function renderUpdateMirror(r, s) {
   const sub = el("div", "sub");
   who.append(sub);
   const m = s.updateMirror || "";
-  sub.textContent = mirrorErr || (m ? t("Updates are downloaded through this mirror, each checked against usemagpie.ai's checksum")
-    : t("Updates are downloaded from GitHub; a mirror can be used where GitHub is slow"));
+  sub.textContent = mirrorErr || (m ? t("Updates are downloaded from usemagpie.ai, and through this mirror when that fails, each checked against usemagpie.ai's checksum")
+    : t("Updates are downloaded from usemagpie.ai, and from GitHub when that fails; a mirror can stand in for GitHub where it is slow"));
   sub.classList.toggle("err", !!mirrorErr);
   sub.title = t("The update and its checksum always come from usemagpie.ai; a file from the mirror that doesn't match it is not installed.");
   if (!mirrorEditing) {
     if (m) {
-      const official = el("button", "text", t("Use GitHub"));
+      const official = el("button", "text", t("Remove mirror"));
       official.onclick = () => setUpdateMirror("").catch(statusTErr);
       const change = el("button", "text", t("Change"));
       change.onclick = () => { mirrorEditing = true; mirrorDraft = m; renderUpdateMirror(r, s); };
@@ -19874,7 +19873,7 @@ function renderUpdateMirror(r, s) {
     } else {
       const add = el("button", "text", t("Use a mirror…"));
       add.onclick = () => { mirrorEditing = true; mirrorDraft = ""; renderUpdateMirror(r, s); };
-      val.append(el("code", "", "GitHub"), add);
+      val.append(el("code", "", "usemagpie.ai"), add);
     }
     return;
   }
@@ -20251,7 +20250,7 @@ async function renderSync(v) {
   // computer's setup can go up in its place, the user choosing it
   if (v.on && v.error && v.serverFile?.replace) {
     row(t("Upload this computer's setup"), t("It replaces the file on the server. That file is kept in the sync folder first."),
-      btn(t("Upload…"), () => askUpload(v.serverFile)));
+      btn(t("Upload…"), () => syncFile("askUpload", v.serverFile)));
   }
   // agent fields set back here after a sync changed them (hayden4608)
   if (v.on && v.agents !== false && v.own?.length) {
@@ -20291,7 +20290,7 @@ async function renderSync(v) {
         renderSync(await api("davsync/auto", { minutes: m || -1 }).catch((x) => ({ ...v, error: x.message })));
       }));
     row(t("Restore from the server"), t("This computer's setup becomes the one on the server. What is here now is kept first, to undo."),
-      btn(t("Restore…"), () => askRestore(v, parts)));
+      btn(t("Restore…"), () => syncFile("askRestore", v, parts)));
   }
 
   // export and import
@@ -20304,55 +20303,14 @@ async function renderSync(v) {
   if (window.autoBackupFill) autoBackupFill(ab); else import("./autobackup.js").then(() => autoBackupFill(ab), () => {});
 }
 
-// syncFile draws the server's, Export's or Import's form, from syncfiles.js once loaded
-function syncFile(f, v) {
-  if (window[f]) return window[f](v);
+// syncFile draws the server's, Export's or Import's form, or asks before a
+// Restore or Upload, from syncfiles.js once loaded
+function syncFile(f, v, ...more) {
+  if (window[f]) return window[f](v, ...more);
+  if (f.startsWith("ask")) return import("./syncfiles.js").then(() => window[f](v, ...more), statusErr);
   const at = el("div");
   import("./syncfiles.js").then(() => at.replaceWith(window[f](v)), () => {});
   return at;
-}
-
-// askRestore asks before the server's setup replaces this computer's
-// (#847); what is here is kept, and the notice it leaves can undo it.
-function askRestore(v, parts) {
-  const ed = el("div", "editor restore-ask");
-  const head = el("div", "ehead");
-  head.append(el("b", "", t("Restore from the server?")));
-  ed.append(head);
-  const goes = ["providers", "settings", "profiles"];
-  if (v.agents !== false) goes.push("agents");
-  if (v.library !== false) goes.push("library");
-  ed.append(el("p", "lib-confirm", t("This computer's {parts} become the ones on the server, as your other computers last synced them. Whatever was changed here since is replaced.", { parts: parts(goes) })));
-  ed.append(el("p", "lib-confirm", t("What is here now is sealed into the sync folder first, and Undo puts it back.")));
-  const err = el("p", "editor-error", "");
-  ed.append(err);
-  const bar = el("div", "bar");
-  const go = el("button", "text primary danger-fill", t("Restore setup"));
-  go.onclick = async (e) => {
-    e.stopPropagation();
-    go.disabled = true;
-    go.classList.add("busy");
-    try {
-      const r = await api("davsync/restore", {});
-      closeConfirmAsk();
-      renderSync(r);
-      if (r.error) return;
-      if (r.brought?.length) refreshAfterSync();
-      else status(t("This computer's setup is already the server's: nothing to restore"), "ok");
-    } catch (x) {
-      go.disabled = false;
-      go.classList.remove("busy");
-      err.textContent = x.message;
-    }
-  };
-  const cancel = el("button", "text", t("Cancel"));
-  cancel.onclick = cancelAsk;
-  bar.append(el("span", "grow"), cancel, go);
-  ed.append(bar);
-  confirmAsk = ed;
-  openModal(ed);
-  $("#modal").classList.add("lib");
-  cancel.focus(NO_SCROLL);
 }
 
 // serverFileSaid: what the server holds where the backup should be, in the
@@ -20372,44 +20330,6 @@ function serverFileSaid(f) {
     case "json": return t("the file on the server is a JSON file that isn't a magpie backup ({size})", { size });
   }
   return t("the file on the server isn't a magpie backup: it is {type} ({size})", { type: f.type || "?", size });
-}
-
-// askUpload asks before this computer's setup replaces a server file that
-// isn't a backup; the server's file is kept in the sync folder first.
-function askUpload(f) {
-  const ed = el("div", "editor restore-ask upload-ask");
-  const head = el("div", "ehead");
-  head.append(el("b", "", t("Replace the file on the server?")));
-  ed.append(head);
-  ed.append(el("p", "lib-confirm", t("This computer's setup goes up in place of the file on the server, and your other computers sync with it from then on.")));
-  if (f.what === "cut") ed.append(el("p", "lib-confirm", t("What another computer wrote into that file and has nowhere else is lost. If one of them synced it last, Sync now there may rebuild it instead.")));
-  ed.append(el("p", "lib-confirm", t("The file on the server is kept in the sync folder first.")));
-  const err = el("p", "editor-error", "");
-  ed.append(err);
-  const bar = el("div", "bar");
-  const go = el("button", "text primary danger-fill", t("Upload this computer's setup"));
-  go.onclick = async (e) => {
-    e.stopPropagation();
-    go.disabled = true;
-    go.classList.add("busy");
-    try {
-      const r = await api("davsync/upload", {});
-      closeConfirmAsk();
-      renderSync(r);
-    } catch (x) {
-      go.disabled = false;
-      go.classList.remove("busy");
-      err.textContent = x.message;
-    }
-  };
-  const cancel = el("button", "text", t("Cancel"));
-  cancel.onclick = cancelAsk;
-  bar.append(el("span", "grow"), cancel, go);
-  ed.append(bar);
-  confirmAsk = ed;
-  openModal(ed);
-  $("#modal").classList.add("lib");
-  cancel.focus(NO_SCROLL);
 }
 
 // refreshAfterSync: what a sync or an import brought in reaches the other
