@@ -107,10 +107,14 @@ type candidate struct {
 // renews (zero when one doesn't say). noCredits: it is a Codex account
 // held at 100% as it is set not to spend its credits (cap is 100 then).
 type capHold struct {
-	cap       int
-	used      float64
-	back      time.Time
-	noCredits bool
+	cap  int
+	used float64
+	// amount: held at a window's fixed amount (provider.CapHold.Amount),
+	// count of it used, in unit
+	amount, count float64
+	unit          string
+	back          time.Time
+	noCredits     bool
 	// unread: held by a careful provider as its usage can't be told, why
 	// (carefulDoubt), cap then the account's own
 	unread string
@@ -578,6 +582,23 @@ func (s *Server) planPaused(p provider.Provider, model string, from provider.Pro
 	return restLast(out, pl)
 }
 
+// groupsAfter is p with the routing groups the user built that have p's
+// model in them (provider.GroupsAfter) added after its own fallbacks,
+// those it has already left out; ok is false when there are none to add.
+func groupsAfter(p provider.Provider, model string) (provider.Provider, bool) {
+	var add []string
+	for _, id := range provider.GroupsAfter(p.ID + "/" + model) {
+		if !slices.Contains(p.Fallback, id) {
+			add = append(add, id)
+		}
+	}
+	if len(add) == 0 {
+		return p, false
+	}
+	p.Fallback = append(slices.Clone(p.Fallback), add...)
+	return p, true
+}
+
 // planFallbackGroup is planGroup for a routing group a provider falls back
 // to, its rows added to pl as fallbacks reached through g: the group's
 // keys and accounts in its own order, sunk by its own Sink, those set
@@ -937,7 +958,7 @@ func capHeld(p, acct provider.Provider, model string, now time.Time) *capHold {
 		}
 		return nil
 	}
-	return &capHold{cap: h.Cap, used: h.Used, back: h.Back, noCredits: h.Credits}
+	return &capHold{cap: h.Cap, used: h.Used, back: h.Back, noCredits: h.Credits, amount: h.Amount, count: h.Count, unit: h.Unit}
 }
 
 // cappedError says why a request for model went nowhere when every account
@@ -996,6 +1017,9 @@ func heldReasons(ws []Weighed, now time.Time) ([]string, time.Time) {
 			continue
 		}
 		s := fmt.Sprintf("%s (%s) is at %.0f%% of a usage window, past its %d%% cap", w.Name, w.Who, w.Used, w.Capped)
+		if w.CapAmount > 0 {
+			s = fmt.Sprintf("%s (%s) has used %s %s of a usage window, past its cap of %s", w.Name, w.Who, amountText(w.CapCount), w.CapUnit, amountText(w.CapAmount))
+		}
 		if w.SpendCap > 0 {
 			s = fmt.Sprintf("%s (%s) has spent %s of the %s spend cap set on it %s, as magpie's usage prices its calls", w.Name, w.Who, usd(w.Spent), usd(w.SpendCap), spendPeriod(w.SpendPeriod, w.SpendSince, now))
 		}
@@ -1033,6 +1057,12 @@ func spendOnly(ws []Weighed) bool {
 		n++
 	}
 	return n > 0
+}
+
+// amountText is a window's count as a cap at a fixed amount says it: whole
+// when it is, else to two places.
+func amountText(v float64) string {
+	return strconv.FormatFloat(math.Round(v*100)/100, 'f', -1, 64)
 }
 
 // usd is an amount in dollars as a spend cap is told: cents kept.
@@ -1153,6 +1183,7 @@ func barredOf(cs []candidate, q provider.Provider, fallback bool, from provider.
 		w.Unlisted, w.Via = true, via
 		if h := c.capped; h != nil {
 			w.Capped, w.Used, w.NoCredits, w.Unread = h.cap, h.used, h.noCredits, h.unread
+			w.CapAmount, w.CapCount, w.CapUnit = h.amount, h.count, h.unit
 			if sp := h.spend; sp != nil {
 				w.SpendCap, w.Spent, w.SpendPeriod = sp.usd, sp.spent, sp.period
 				if sp.period == provider.SpendTotal {
@@ -3072,6 +3103,9 @@ type keptAlive struct {
 	// 40 MB upload asked four times) failed 502 instead of being made
 	// without a model (#4862)
 	whole bool
+	// clientEnd is when the client said it stops waiting (clientEnd),
+	// zero when it said nothing
+	clientEnd time.Time
 	// Only opted-in Claude cache reporting can defer initial keepalives.
 	// Selection releases it before process startup; expiry keeps the stream alive.
 	cacheReportUntil time.Time
@@ -3106,6 +3140,32 @@ func (a *keptAlive) compactsInStream(status int, msg string) bool {
 // reply would go agentQuietMost without one after d more.
 func (a *keptAlive) tooQuiet(d time.Duration) bool {
 	return a != nil && a.streams && a.proto == provider.Responses && !a.told.IsZero() && time.Since(a.told)+d >= agentQuietMost
+}
+
+// clientRoom is how long a client that said how long it waits is left,
+// after a pause, for the try the pause is for to answer and the reply or
+// its error to reach it.
+const clientRoom = 10 * time.Second
+
+// clientEnd is when a request's client stops waiting, from the seconds
+// it named in provider.WaitHeader (a model test asking a remote magpie),
+// counted from start; zero when it named none, or nothing readable.
+func clientEnd(h http.Header, start time.Time) time.Time {
+	n, err := strconv.Atoi(strings.TrimSpace(h.Get(provider.WaitHeader)))
+	if err != nil || n <= 0 {
+		return time.Time{}
+	}
+	return start.Add(time.Duration(min(n, 3600)) * time.Second)
+}
+
+// outlives says whether a pause of d, with clientRoom after it, would end
+// past the time the client said it waits: its pause isn't taken, and the
+// client has the error while it still waits for one (plugins#827: a
+// remote magpie's model test waited 20s while the server kept its 502
+// through the provider's patience, 45s and more, and the test said only
+// that no answer came).
+func (a *keptAlive) outlives(d time.Duration) bool {
+	return a != nil && !a.clientEnd.IsZero() && time.Now().Add(d+clientRoom).After(a.clientEnd)
 }
 
 // keepAlive tells the agent of a stream held past keepHeldAfter for its
