@@ -69,12 +69,17 @@ jobs:
           ditto -c -k --keepParent magpie.app "magpie-darwin-arm64.zip"
           hdiutil create -volname magpie -srcfolder magpie.app -ov -format UDZO "magpie-darwin-arm64.dmg"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mac
-          path: |
-            magpie-darwin-arm64.zip
-            magpie-darwin-arm64.dmg
+      - name: Attach the app once the release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && break
+            sleep 10
+          done
+          gh release upload "$VERSION" magpie-darwin-arm64.zip magpie-darwin-arm64.dmg --clobber
 
   docker:
     runs-on: ubuntu-latest
@@ -102,7 +107,7 @@ jobs:
           docker push "$IMAGE:latest"
 
   publish:
-    needs: [cli, mac, docker]
+    needs: [cli, docker]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
