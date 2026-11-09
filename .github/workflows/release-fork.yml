@@ -1,0 +1,125 @@
+name: Release fork
+
+# The upstream release workflow builds yetone/magpie-releases and copies it
+# back. This one builds personal, where the fork's own changes live, and
+# publishes that tree at the same version number.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream version, no v prefix'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: personal
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build the terminal binaries
+        env:
+          VERSION: v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "${VERSION#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          make release-cli VERSION="$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli
+          path: dist/*
+
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: personal
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build and pack the app
+        env:
+          VERSION: v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "${VERSION#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          make app VERSION="$VERSION"
+          test "$(uname -m)" = "arm64"
+          if strings -a magpie.app/Contents/MacOS/magpie | grep -q phc_nyDy; then
+            echo "posthog key is linked" >&2
+            exit 1
+          fi
+          id=$(plutil -extract CFBundleIdentifier raw magpie.app/Contents/Info.plist)
+          test "$id" = "com.zhsama.magpie"
+          ditto -c -k --keepParent magpie.app "magpie-darwin-arm64.zip"
+          hdiutil create -volname magpie -srcfolder magpie.app -ov -format UDZO "magpie-darwin-arm64.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            magpie-darwin-arm64.zip
+            magpie-darwin-arm64.dmg
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: personal
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push the server image
+        env:
+          VERSION: v${{ inputs.version }}
+          IMAGE: ghcr.io/zhsama/magpie
+        run: |
+          set -euo pipefail
+          [[ "${VERSION#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          docker build --build-arg "VERSION=$VERSION" \
+            -t "$IMAGE:${VERSION#v}" -t "$IMAGE:latest" .
+          docker push "$IMAGE:${VERSION#v}"
+          docker push "$IMAGE:latest"
+
+  publish:
+    needs: [cli, mac, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum * > SHA256SUMS
+          notes=$(printf '%s\n' \
+            "Fork of yetone/magpie at $VERSION, with the daily PostHog count removed." \
+            "The macOS app is unsigned and arm64 only." \
+            "Server image: ghcr.io/zhsama/magpie:${VERSION#v} (linux/amd64).")
+          gh release create "$VERSION" --target personal --title "magpie $VERSION" --notes "$notes" ./*

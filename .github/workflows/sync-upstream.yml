@@ -59,3 +59,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run macos.yml --ref personal --repo "${GITHUB_REPOSITORY}"
+
+      - name: Publish this fork at the upstream version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver=$(git ls-remote --tags https://github.com/yetone/magpie.git \
+            | awk -F/ '/refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {print $3}' \
+            | sort -V | tail -1)
+          ver="${ver#v}"
+          [ -n "$ver" ]
+          if gh release view "v$ver" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "v$ver is already published"
+            exit 0
+          fi
+          gh workflow run release-fork.yml --ref main -f version="$ver"
