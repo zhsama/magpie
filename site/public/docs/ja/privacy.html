@@ -55,6 +55,13 @@
     <a class="toc-only" href="/docs/ja/masking">プライバシーマスキング</a>
     <a class="toc-only" href="/docs/ja/mcp-router">MCP ルーター</a>
     <a class="toc-only" href="/docs/ja/library">ライブラリ</a>
+    <a class="toc-only" href="/docs/ja/claude-code-models">Claude Code で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/codex-models">Codex で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/gemini-cli-models">Gemini CLI で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/subscriptions">サブスクを任意のエージェントで</a>
+    <a class="toc-only" href="/docs/ja/local-models">ローカルモデル</a>
+    <a class="toc-only" href="/docs/ja/opencode-models">OpenCode で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/alternatives">CC Switch・CCR との比較</a>
     <a href="/docs/ja/import">magpie に追加</a>
     <a href="/docs/integrate">アプリ連携</a>
     <a href="https://github.com/yetone/magpie-releases/releases">リリース</a>
@@ -178,6 +185,7 @@
     <p>magpie はプライバシー設定にかかわらず、どのアプリも自分の更新サーバーに尋ねるのと同じように、自分のサイトにいくつか尋ねます。どのリクエストにもインストール ID やアカウントは付きません。</p>
     <ul>
       <li><code>/api/latest</code>：更新情報。<code>noAutoUpdate</code> がオンでなければ 6 時間ごと。<code>?lang=</code> であなたの言語のノートを取ります。<span class="ui">設定</span> → <span class="ui">情報</span> → <span class="ui">アップデートチャネル</span>が安定版なら <code>?channel=stable</code> も付けます。どちらもあなたが誰かは含みません。<code>/api/notes</code> は更新後の「新機能」です。</li>
+      <li><code>/files/&lt;バージョン&gt;/&lt;ファイル&gt;</code>：更新とインストーラがダウンロードするリリースファイルで、Cloudflare R2 から配信されます。サイトにないファイルは github.com へ転送されます。何も計測しません。</li>
       <li><code>/api/partners</code>：プロバイダー追加シートのパートナー一覧。6 時間ごと。パートナーが載っている間、10 回に 1 回の取得を Cloudflare が示す国とともに <code>magpie partners fetch</code> として数えます。</li>
       <li><code>/go/&lt;パートナー&gt;/site</code> と <code>/go/&lt;パートナー&gt;/keys</code>：パートナーの公式サイトとキーのページへのリンクをブラウザーで開くと、移動の前に <code>magpie partner go</code>（どのパートナーか、どのリンクか、地域、国）として数えます。</li>
       <li><code>/api/icon?url=…</code>：プラグイン、インポートリンク、ライブラリが示すアイコンはここを経由して取得するので、アイコンのあるホストに見えるのはあなたではなく Cloudflare のアドレスです。画像を中継するだけで、数えることも記録することもしません。</li>
@@ -224,6 +232,13 @@
     <a href="/docs/ja/masking">プライバシーマスキング</a>
     <a href="/docs/ja/mcp-router">MCP ルーター</a>
     <a href="/docs/ja/library">ライブラリ</a>
+    <a href="/docs/ja/claude-code-models">Claude Code で他のモデル</a>
+    <a href="/docs/ja/codex-models">Codex で他のモデル</a>
+    <a href="/docs/ja/gemini-cli-models">Gemini CLI で他のモデル</a>
+    <a href="/docs/ja/subscriptions">サブスクを任意のエージェントで</a>
+    <a href="/docs/ja/local-models">ローカルモデル</a>
+    <a href="/docs/ja/opencode-models">OpenCode で他のモデル</a>
+    <a href="/docs/ja/alternatives">CC Switch・CCR との比較</a>
     <a href="/docs/ja/import">magpie に追加</a>
     <a href="/docs/integrate">アプリ連携</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
