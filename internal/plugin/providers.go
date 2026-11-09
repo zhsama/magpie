@@ -28,6 +28,9 @@ import (
 type Method struct {
 	Type  string `json:"type"`
 	Label string `json:"label"`
+	// Labels is Label by the window's language ("zh", "zh-TW", "ja",
+	// "de"), magpie's own field beside OpenCode's (host.js byLang)
+	Labels map[string]string `json:"labels,omitempty"`
 	// Placeholder is the hint an "api" method gives in its key's field
 	// (magpie's own field: OpenCode's says "API key")
 	Placeholder string `json:"placeholder,omitempty"`
@@ -150,6 +153,12 @@ type Provider struct {
 	// 5 minutes when not said), as the host reckons it (RenewAt).
 	Renews    bool  `json:"renews,omitempty"`
 	RenewLead int64 `json:"renewLead,omitempty"`
+	// Rotating is the auth hook declaring that the vendor spends a refresh
+	// token once (auth.rotating): renewed, the old one is refused
+	// (invalid_grant). Two computers holding a copy would race to renew it
+	// and the loser is signed out for good, so its sign-ins are never
+	// carried by a backup or a sync (provider.CollectSignIns, #5583).
+	Rotating bool `json:"rotating,omitempty"`
 	// Options are the switches the plugin declares for the provider
 	// (auth.options, #2038), as the host checked them
 	Options []Option `json:"options,omitempty"`
@@ -915,14 +924,19 @@ func SignedIn(provider string) bool {
 
 // Prompt is a question a sign-in method asks before it starts.
 type Prompt struct {
-	Type        string `json:"type"` // text, select, password (text typed unseen, #1982)
-	Key         string `json:"key"`
-	Message     string `json:"message"`
-	Placeholder string `json:"placeholder,omitempty"`
+	Type    string `json:"type"` // text, select, password (text typed unseen, #1982)
+	Key     string `json:"key"`
+	Message string `json:"message"`
+	// Messages, an option's Labels and Hints are those words by the
+	// window's language, as Method.Labels
+	Messages    map[string]string `json:"messages,omitempty"`
+	Placeholder string            `json:"placeholder,omitempty"`
 	Options     []struct {
-		Label string `json:"label"`
-		Value string `json:"value"`
-		Hint  string `json:"hint,omitempty"`
+		Label  string            `json:"label"`
+		Value  string            `json:"value"`
+		Hint   string            `json:"hint,omitempty"`
+		Labels map[string]string `json:"labels,omitempty"`
+		Hints  map[string]string `json:"hints,omitempty"`
 	} `json:"options,omitempty"`
 }
 

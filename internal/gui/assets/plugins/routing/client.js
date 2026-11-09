@@ -21,7 +21,8 @@ magpie.plugin("routing", (ctx) => {
     title: "Routing",
     html: `
     <div class="row-head"><span class="label" data-t>Routing</span><span class="rt-livedot" aria-hidden="true"></span><span class="note" data-t>live, as the gateway decides</span><span class="grow"></span>
-      <button class="text rt-togroups" type="button" id="rtToGroups"><span data-t>Routing groups</span> ›</button>
+      <button class="text rt-togroups" type="button" id="rtToGroups" data-feature="groups"><span data-t>Routing groups</span> ›</button>
+      <button class="text rt-toset" type="button" id="rtToSet"><span data-t>Settings</span> ›</button>
       <button class="text rt-mask" id="rtMask" aria-pressed="false" data-tt="Mask the accounts on every page — email addresses and account names — for a screenshot to share"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.9 4.2A10.4 10.4 0 0 1 12 4c6.5 0 10 8 10 8a17.6 17.6 0 0 1-2.2 3.2M6.6 6.6C3.9 8.4 2 12 2 12s3.5 8 10 8a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2M2 2l20 20"/></svg><span data-t>Hide accounts</span></button></div>
     <section class="rt" id="rt"></section>
     <div class="rt-more" id="rtMore"></div>
@@ -55,6 +56,10 @@ function routingPage(part) {
   // the groups' way in where the header's row has no tab for them (markNav)
   const toGroups = $("#rtToGroups");
   if (toGroups) toGroups.onclick = async () => { if (await window.show("groups")) openedFrom(toGroups); };
+  // what routing does when an account refuses or every one rests, and a
+  // busy model's place, are set in Settings › Models › Routing
+  const toSet = $("#rtToSet");
+  if (toSet) toSet.onclick = (e) => openSettingsAt(e, "models", "#routeList .row");
   const NS = "http://www.w3.org/2000/svg";
   const still = calm;
   const shown = () => !$("#view-routing").hidden && !document.hidden;
@@ -2767,7 +2772,13 @@ function routingPage(part) {
     const g = r.group;
     const routing = g ? g.routing || "" : f?.routing || "";
     const m = modeOf(routing);
-    const on = r.order.filter((x) => !x.fallback).length;
+    // a group is said by its members on as the request came (GroupRef's
+    // members, those ready), not by who this request was weighed among:
+    // a conversation held to one member (native compaction, Strict, a
+    // sealed task, a key's models) read as the group having one on
+    // (adorable_piglet on Discord: three of five on, "1 on"); why it went
+    // to that one alone is the first line's to say
+    const on = g?.members?.length || r.order.filter((x) => !x.fallback).length;
     const pool = !g && f ? poolOf(f.provider) : null;
     // none weighed: a request magpie holds before routing it (masked
     // first, or still read), or one nothing took. It says so, not "0 on"
@@ -2832,19 +2843,21 @@ function routingPage(part) {
   async function goRouting(e, go) {
     const i = go.indexOf(":"), kind = go.slice(0, i), id = CSS.escape(go.slice(i + 1));
     const row = kind === "group" ? gList.querySelector(`.rt-group[data-id="${id}"]`) : pList.querySelector(`.rt-pool[data-provider="${id}"]`);
-    if (!row) return;
-    // they are on the Routing groups page: it opens, and the row comes
+    if (!row || featureHides(row)) return;
+    // they are on the Routing groups page (on Routing with the groups
+    // off: groupsHome): it opens, and the row comes
     // into sight as the reader's click asked. A page just opened is at the
     // row at once, and that is where the reader is in it (arrived): else
     // the page put itself back where the reader last left it
-    const asked = window.scrollOnPurpose?.(e), opens = gView().hidden;
-    if (opens && !(await window.show("groups"))) return;
+    const home = gsec.closest("main") || gView();
+    const asked = window.scrollOnPurpose?.(e), opens = home.hidden;
+    if (opens && !(await window.show(home.id.slice("view-".length)))) return;
     // from Routing: its toolbar leads back to the request (gBack)
-    if (opens && e.target.closest?.("#view-routing")) openedFrom(e.target.closest(".rt-go"));
+    if (opens && home === gView() && e.target.closest?.("#view-routing")) openedFrom(e.target.closest(".rt-go"));
     if (asked) {
       readerScrolls(1000);
       row.scrollIntoView({ block: "center", behavior: opens || still() ? "auto" : "smooth" });
-      if (opens) window.arrived?.(gView());
+      if (opens) window.arrived?.(home);
     }
     row.classList.remove("rt-found");
     void row.offsetWidth;
@@ -4737,6 +4750,7 @@ function routingPage(part) {
     return by;
   }
   const provBoxes = new Map(); // a provider → its box in the accounts' list (renderActs)
+  const provHeads = new Map(); // a provider → its heading there, and what it said (renderActs)
   function renderActs(rs) {
     // a rest lifted by hand since the request that found it (#1869): the
     // kept requests still say it, until the next one asks it again. By the
@@ -4769,10 +4783,12 @@ function routingPage(part) {
     const meta = new Map();
     const put = (e, leads, keep = false) => {
       if (leads) return lead.push(e);
-      const b = lead.length ? el("div", "rt-lead") : e;
-      if (lead.length) b.append(...lead.splice(0), e);
+      // a block is its nodes in a list, never a box they are moved
+      // into: a heading or a keys' row kept from the last drawing stays
+      // where it is in the page until patch finds it in place
+      const b = [...lead.splice(0), e];
       out.push(b);
-      meta.set(b, { prov, keep, n: b === e ? 1 : b.querySelectorAll(".rt-act").length });
+      meta.set(b, { prov, keep, head: b[0].classList.contains("rt-prov"), n: b.length === 1 ? 1 : b.reduce((n, x) => n + x.matches(".rt-act") + x.querySelectorAll(".rt-act").length, 0) });
     };
     // refused for its sign-in, and not answered since
     const needsSignIn = (a) => a.w.kind === "account" && a.authAt > a.last;
@@ -4794,15 +4810,26 @@ function routingPage(part) {
       let opened = false;
       if (w.provider !== prov) {
         prov = w.provider;
-        const h = el("div", "rt-prov");
-        h.append(icon(w.icon || w.preset || "generic"), el("b", "", w.name || w.provider));
         // how it routes, only where it routes over several, and a way to
         // where that is set
-        if (poolOf(prov)) {
-          const m = modeOf(list.find((x) => x.w.provider === prov && !x.w.fallback)?.w.routing || "");
-          const s = el("span", "", t(w.kind === "key" && !w.routing ? "Smart" : m[0]));
-          goTo(s, "pool:" + prov, w.name || w.provider);
-          h.append(s);
+        const ic = w.icon || w.preset || "generic", nm = w.name || w.provider;
+        const mode = poolOf(prov) ? t(w.kind === "key" && !w.routing ? "Smart" : modeOf(list.find((x) => x.w.provider === prov && !x.w.fallback)?.w.routing || "")[0]) : null;
+        // kept from one drawing to the next while it says the same: this
+        // runs each second (countdown), and a new heading's <img> asks
+        // for its icon again whether or not patch keeps the old one, five
+        // icons a second over the app's asset server, each a new SVG
+        // document in the webview (freefcw on X, 11-09)
+        const key = [ic, nm, mode].join("\u0000");
+        let h = provHeads.get(prov)?.key === key ? provHeads.get(prov).h : null;
+        if (!h) {
+          h = el("div", "rt-prov");
+          h.append(icon(ic), el("b", "", nm));
+          if (mode !== null) {
+            const s = el("span", "", mode);
+            goTo(s, "pool:" + prov, nm);
+            h.append(s);
+          }
+          provHeads.set(prov, { key, h });
         }
         put(h, true);
       }
@@ -4950,7 +4977,7 @@ function routingPage(part) {
     }
     // a provider's heading, in one block with its first row, goes with
     // the rows of it shown
-    for (const b of out) if (hide.has(b) && seen.has(meta.get(b).prov) && b.querySelector(":scope > .rt-prov")) hide.delete(b);
+    for (const b of out) if (hide.has(b) && seen.has(meta.get(b).prov) && meta.get(b).head) hide.delete(b);
     for (const b of hide) hidden += meta.get(b).n;
     if (hidden <= 2) hide.clear();
     // written only when changed: a redraw with nothing new writes nothing
@@ -4975,7 +5002,7 @@ function routingPage(part) {
       let g = provBoxes.get(p);
       if (!g) provBoxes.set(p, (g = el("div", "rt-pgrp")));
       // its heading's block opened into it: each row no deeper than before
-      patch(g, bs.flatMap((b) => (b.classList.contains("rt-lead") ? [...b.children] : [b])));
+      patch(g, bs.flat());
       // hundreds of keys opened (#3164) in one unbroken box would be one
       // column as long as all of them: a long one breaks between its rows
       const long = bs.reduce((x, b) => x + meta.get(b).n, 0) > 12;
@@ -5816,6 +5843,8 @@ function routingPage(part) {
       applyFeatures(next);
       status(t("Routing groups are on"), "ok", 1500);
       loadGroups();
+      // the note was on Routing (groupsHome): the groups are on their page
+      if (!$("#view-routing").hidden && document.body.classList.contains("window")) window.show("groups");
     } catch (err) {
       status(t(err.message), "err");
     } finally {
@@ -5824,7 +5853,8 @@ function routingPage(part) {
   };
   const gOffBox = el("div", "list rt-goffbox");
   gOffBox.append(el("div", "rt-goffwhy", t("Routing groups are off in Plugins › Built-in: the groups magpie finds, one model several providers serve, still route, but your own can't be made or changed here.")), gOn);
-  gOff.append(gOffBox);
+  // on Routing then (groupsHome), under its requests, named as before 11-06
+  gOff.append(el("div", "row-head", el("span", "label", t("Routing groups"))), gOffBox);
   // the settings that hold for every group, under the list (11-06)
   const sHead = el("div", "row-head rt-gset-head");
   sHead.dataset.feature = "groups";
@@ -5834,9 +5864,16 @@ function routingPage(part) {
   gSet.append(gFound, gNames, ...gDefs);
   gsec.append(gHead, gList, gOff, sHead, gSet, pHead, pList);
   // on the Routing groups page, a page of their own; Try again on it puts
-  // them back in its markup made anew
+  // them back in its markup made anew. With the groups off, that page's
+  // tab leaves the sidebar (yyddbds on Discord: it stayed), and what is
+  // left of it, the note that turns them on and the providers' own
+  // accounts, goes under Routing's requests, where it was before 11-06.
+  // app.js asks again when a built-in is switched (applyFeatures).
   const gHome = () => $("#rtGroups");
-  window.routingGroupsHome = (main) => (main?.querySelector("#rtGroups") || gHome())?.append(gsec);
+  window.routingGroupsHome = (main) => {
+    const to = featuresOff.has("groups") ? more : main?.querySelector("#rtGroups") || gHome();
+    if (to && gsec.parentElement !== to) to.append(gsec);
+  };
   window.routingGroupsHome();
   if (gHome()) byWidth(gHome(), { max520: (w) => w <= 520 });
   const ROUTE_OPTS = [["", "Smart"], ["order", "In order"], ["drain", "Until used up"], ["rotate", "In turn"], ["usage", "Least used"], ["pace", "Use before expiry"], ["free", "Free first"], ["fast", "Speed first"]];
@@ -7399,7 +7436,7 @@ function routingPage(part) {
       // free: the vendor's word, zero: listed at $0 there (jiangguochao666 on X)
       const ref = (x) => ({ value: x.id, label: x.name || x.id, note: noted(x.providerName, x.id), icon: x.icon, group: x.providerName, ref: x.id, context: x.context, free: x.free, zero: x.zero });
       // the image models after them, said as such (jzw690 on X): a group
-      // of them is picked in Settings › Images, or named at the images API
+      // of them is picked in Settings › Models › Images, or named at the images API
       const drawRef = (x) => ({ ...ref(x), note: noted(`${x.providerName} · ${t("Image model")}`, x.id) });
       const options = [...subs, ...(decides ? [] : groups.models.map(ref)), ...(decides ? [] : (groups.drawers || []).map(drawRef)), ...(chats ? [] : (groups.deciders || []).map(ref))];
       // the member a model is in the group as: itself, or with its
@@ -7515,20 +7552,32 @@ function routingPage(part) {
     drawPats();
     const pw = el("div");
     pw.append(pbox, el("div", "hint", t("Every model a pattern matches is in the group, now and as providers list new ones, after the models above: * is any run of characters in provider/model, re: starts a regular expression.")));
-    ed.append(el("label", "", t("Patterns")), pw);
+    // what few change — patterns, the lists, routing, the waits, the
+    // window, how long a conversation stays, reasoning — folded under
+    // Advanced below the rules, as a provider's editor folds its own (the
+    // owner: the form was too much at once). Open when one of them is set,
+    // or as it was left while this group is being edited
+    const adv = edAligned(el("details", "more advanced rt-gadv"));
+    adv.open = gEdit.adv ?? !!(d.match.length || d.unlists || d.routing || d.sink === "sink" || d.sink === "" || d.firstToken || d.patience || d.context || d.affinity || d.effort || d.levels?.length);
+    const advOf = gEdit;
+    adv.onfold = (open) => { advOf.adv = open; };
+    adv.append(el("summary", "", t("Advanced")));
+    const advIn = el("div", "inner");
+    adv.append(advIn);
+    advIn.append(el("label", "", t("Patterns")), pw);
     // its models in the lists agents see too, or the group alone (#1783)
     const listHint = el("div", "hint", t(LIST_HINT[d.unlists ? "unlists" : ""])), listW = el("div");
     const listPick = segs(LIST_OPTS.map(([id, n]) => [id, t(n)]), d.unlists ? "unlists" : "", (v) => { d.unlists = v === "unlists"; listHint.textContent = t(LIST_HINT[v]); });
     listPick.classList.add("list-pick");
     listW.append(listPick, listHint);
-    ed.append(el("label", "", t("Model lists")), listW);
+    advIn.append(el("label", "", t("Model lists")), listW);
 
     const gHint = (v) => GROUP_HINT[v] ? t(GROUP_HINT[v]) : MODES[v] || !v ? t(GROUP_HINT[""]) : modeOf(v)[1];
     const rHint = el("div", "hint", gHint(d.routing));
     const rw = el("div");
     rw.append(routingSegs(withJS(GROUP_ROUTE_OPTS, d.routing).map(([id, n, js]) => [id, t(n), , js]), d.routing, (v) => { d.routing = v; rHint.textContent = gHint(v); draw(); drawRules(); drawSink(); }), rHint);
     rw.append(el("div", "hint", t(GROUP_NEST)));
-    ed.append(el("label", "", t("Routing")), rw);
+    advIn.append(el("label", "", t("Routing")), rw);
     // one rate limited with quota left: its place, or the back
     const kHint = el("div", "hint"), kw = el("div", "sink-wrap"), kLab = el("label", "", t("Rate limited"));
     // Default follows the setting for every group, under the list
@@ -7541,7 +7590,7 @@ function routingPage(part) {
     const kPick = segs(G_SINK_OPTS.map(([id, n]) => [id, t(n)]), d.sink ?? "def", (v) => { d.sink = v; drawSink(); });
     kPick.classList.add("sink-pick");
     kw.append(kPick, kHint);
-    ed.append(kLab, kw);
+    advIn.append(kLab, kw);
     drawSink();
     // a member slow to begin its answer: waited for, or the next asked
     // or after as many minutes as the user types (Kismet Alan on Discord)
@@ -7584,7 +7633,7 @@ function routingPage(part) {
       if (n > 0) d.firstToken = n;
       drawFirst();
     };
-    ed.append(el("label", "", t("Slow to start")), fw);
+    advIn.append(el("label", "", t("Slow to start")), fw);
     drawFirst();
     // every member busy at once: the agent told, or the members asked
     // again within a budget (#1418)
@@ -7596,7 +7645,7 @@ function routingPage(part) {
       : t("When every member has failed with an error that may pass — overloaded, unavailable, rate limited for a moment — and nothing of the reply has reached the agent, each is asked again after a pause, longer each time and never shorter than the vendor asks, for up to {n} more. A streaming agent is kept waiting meanwhile.", { n: patienceWord(pat) }));
     };
     patW.append(segs(G_PATIENCE_OPTS.map(([n, l]) => [n, t(l)]), d.patience || 0, (v) => { d.patience = +v; drawPatience(); }), patHint);
-    ed.append(el("label", "", t("Every member busy")), patW);
+    advIn.append(el("label", "", t("Every member busy")), patW);
     drawPatience();
     // the window agents are told: the largest member's, the smallest's, or
     // one the user names (Mikan on Discord)
@@ -7641,12 +7690,12 @@ function routingPage(part) {
       if (n > 0) d.context = n;
       drawCtx();
     };
-    ed.append(el("label", "", t("Context")), ctxW);
+    advIn.append(el("label", "", t("Context")), ctxW);
     drawCtx();
     const aHint = el("div", "hint", t(AFF_HINT[d.affinity] || AFF_HINT[""]));
     const aw = el("div");
     aw.append(segs(AFF_OPTS.map(([id, n]) => [id, t(n)]), d.affinity, (v) => { d.affinity = v; aHint.textContent = t(AFF_HINT[v] || AFF_HINT[""]); }), aHint);
-    ed.append(el("label", "", t("Stays")), aw);
+    advIn.append(el("label", "", t("Stays")), aw);
 
     // rules: which member a turn goes to first, by what the request shows.
     // A rule reads as one line, a sentence: the conditions it has, then →
@@ -8271,7 +8320,7 @@ function routingPage(part) {
       drawEffort(); drawClassifier();
     }), eHint);
     drawEffort();
-    ed.append(el("label", "", t("Effort")), ew);
+    advIn.append(el("label", "", t("Effort")), ew);
     ed.append(clabel, cw);
     drawRules();
     // the levels agents are offered: those every model has, or ones the
@@ -8307,7 +8356,8 @@ function routingPage(part) {
       drawLevels();
     }), chips, lHint);
     drawLevels();
-    ed.append(el("label", "", t("Levels")), lw);
+    advIn.append(el("label", "", t("Levels")), lw);
+    ed.append(adv);
 
     const bar = el("div", "bar view-foot");
     if (g) {
@@ -8320,7 +8370,7 @@ function routingPage(part) {
     cancel.onclick = cancelGroup;
     const saveBtn = el("button", "text primary", t(g ? "Save" : "Add"));
     const save = () => {
-      if (addPattern() === null) return pin.focus({ preventScroll: true }); // typed, not added: it is meant
+      if (addPattern() === null) return adv.open = true, pin.focus({ preventScroll: true }); // typed, not added: it is meant
       if (!d.members.length && !d.match.length) { addBtn.focus({ preventScroll: true }); return status(t("A group needs a model in it"), "warn"); }
       d.rules.forEach((r) => { r.intent = (r.intent || "").trim(); });
       // hours: both times, or none and no days; days alone are all day

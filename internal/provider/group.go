@@ -791,7 +791,13 @@ func mergeKey(pid, model string, same map[string]string) string {
 // provider. ok is false for any other id, a group the user has of that id,
 // one they removed, and while found groups are on, one there is or that
 // isn't gone for a provider kept out.
-func AutoStandIn(id string) (string, bool) {
+func AutoStandIn(id string) (string, bool) { return AutoStandInFor("", id) }
+
+// AutoStandInFor is AutoStandIn for a request of agent's: the agent's own
+// subscription first when it serves the model (freefcw on X: off, Codex's
+// gpt-6-astra went to Devin, the first provider in the order), then the
+// first provider as AutoStandIn picks.
+func AutoStandInFor(agent, id string) (string, bool) {
 	gid, ok := GroupIDOf(id)
 	if !ok || !strings.HasPrefix(gid, "auto-") {
 		return "", false
@@ -810,17 +816,23 @@ func AutoStandIn(id string) (string, bool) {
 			return "", false
 		}
 	}
-	var first string
+	var first, kept string
 	for _, e := range entries {
 		if AutoGroupOf(e.Provider.ID, e.Model) != gid {
 			continue
 		}
-		if !slices.Contains(f.AutoGroupSkip, e.Provider.ID) {
+		if ownAgent(e.Provider, agent) {
 			return e.ID, true
+		}
+		if kept == "" && !slices.Contains(f.AutoGroupSkip, e.Provider.ID) {
+			kept = e.ID
 		}
 		if first == "" {
 			first = e.ID
 		}
+	}
+	if kept != "" {
+		return kept, true
 	}
 	return first, first != ""
 }
@@ -996,6 +1008,25 @@ func FallbackModels(p Provider) []Member {
 		}
 		if fp, fm, ok := ResolveRoute(id); ok {
 			add(Member{ID: id, Path: []string{id}, Provider: fp, Model: fm})
+		}
+	}
+	return out
+}
+
+// GroupsAfter are the routing groups the user built that have id
+// ("provider/model") in them as a member and another member to go on to,
+// as "group/<id>", in the user's order; one magpie found (Auto), hidden
+// or switched off is none. A request for the model that its own accounts
+// can't take (every one held at its usage cap, or Codex's own sign-in out
+// of its allowance) goes on to these when nothing set as its fallback
+// takes it (adorable_piglet on Discord, v0.1.3354): the Codex app asks
+// Codex's own model, never the group built around it.
+func GroupsAfter(id string) []string {
+	var out []string
+	for _, gid := range MemberGroups()[id] {
+		g, ms, ok := FallbackGroup(gid)
+		if ok && !g.Auto && slices.ContainsFunc(ms, func(m Member) bool { return m.Provider.ID+"/"+m.Model != id }) {
+			out = append(out, gid)
 		}
 	}
 	return out
