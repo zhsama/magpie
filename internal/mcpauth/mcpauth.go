@@ -688,8 +688,8 @@ func contains(l []string, s string) bool {
 }
 
 // register makes magpie a client of the authorization server, sent back to
-// redirect.
-func register(ctx context.Context, m meta, redirect string) (id, secret, method string, err error) {
+// redirect. name is the client_name; empty is Magpie.
+func register(ctx context.Context, m meta, redirect, name string) (id, secret, method string, err error) {
 	if m.RegisterURL == "" {
 		return "", "", "", ErrNoRegistration
 	}
@@ -706,8 +706,12 @@ func register(ctx context.Context, m meta, redirect string) (id, secret, method 
 			return "", "", "", fmt.Errorf("the server's token endpoint takes only %s, which magpie can't do", strings.Join(m.AuthMethods, ", "))
 		}
 	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "Magpie"
+	}
 	reg := map[string]any{
-		"client_name":                "Magpie",
+		"client_name":                name,
 		"client_uri":                 "https://usemagpie.ai",
 		"redirect_uris":              []string{redirect},
 		"grant_types":                []string{"authorization_code", "refresh_token"},
@@ -817,6 +821,10 @@ type App struct {
 	ClientID     string
 	ClientSecret string
 	CallbackPort int
+	// ClientName is the client_name used when magpie registers itself.
+	// Empty is Magpie. It is not used when ClientID is set: that app is
+	// already registered, so magpie does not register again.
+	ClientName string
 }
 
 // Start begins signing magpie in to the server called name at serverURL:
@@ -849,18 +857,26 @@ func StartWith(ctx context.Context, name, serverURL string, app *App) (State, er
 	// magpie's own registration names 127.0.0.1, as RFC 8252 asks; an
 	// app of the user's own is called back as Claude Code calls it back,
 	// at localhost (its v2.1.231 went back to localhost because servers
-	// that match the registered URL exactly refused 127.0.0.1).
+	// that match the registered URL exactly refused 127.0.0.1). A client
+	// name alone still registers, so it keeps 127.0.0.1.
+	own := app != nil && strings.TrimSpace(app.ClientID) != ""
 	host := "127.0.0.1"
-	if app != nil {
+	if own {
 		host = "localhost"
 	}
 	redirect := fmt.Sprintf("http://%s:%d/callback", host, ln.Addr().(*net.TCPAddr).Port)
 	var id, secret, method string
-	if app != nil {
+	if own {
 		id, secret, method = app.ClientID, app.ClientSecret, appMethod(m, app.ClientSecret)
-	} else if id, secret, method, err = register(ctx, m, redirect); err != nil {
-		ln.Close()
-		return State{}, err
+	} else {
+		clientName := ""
+		if app != nil {
+			clientName = app.ClientName
+		}
+		if id, secret, method, err = register(ctx, m, redirect, clientName); err != nil {
+			ln.Close()
+			return State{}, err
+		}
 	}
 	verifier, state := randomToken(48), randomToken(24)
 	sum := sha256.Sum256([]byte(verifier))

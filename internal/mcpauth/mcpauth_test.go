@@ -70,6 +70,30 @@ func TestSignIn(t *testing.T) {
 	}
 }
 
+// A client name is the client_name of magpie's own registration. The
+// callback stays on 127.0.0.1; only an app that already has a client ID
+// is called back at localhost and skips registration.
+func TestSignInRegistersAsNamedClient(t *testing.T) {
+	home(t)
+	f := mcpauthtest.New(t)
+	st, err := mcpauth.StartWith(t.Context(), "figma", f.URL, &mcpauth.App{ClientName: "Claude Code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(st.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(f.Registered) != 1 || f.Registered[0]["client_name"] != "Claude Code" {
+		t.Fatalf("registration = %v", f.Registered)
+	}
+	redirect, _ := f.Registered[0]["redirect_uris"].([]any)
+	if len(redirect) != 1 || !strings.HasPrefix(redirect[0].(string), "http://127.0.0.1:") {
+		t.Errorf("redirect_uris = %v", redirect)
+	}
+}
+
 // A server of the older spec, with no resource metadata, has its
 // authorization server at its own origin, at /authorize, /token and
 // /register.

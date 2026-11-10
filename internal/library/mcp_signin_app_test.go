@@ -81,6 +81,8 @@ func TestOAuthAppChecked(t *testing.T) {
 		{Server{Name: "a", Transport: "stdio", Command: "x", OAuth: &OAuthApp{ClientID: "id"}}, nil, ""},
 		{Server{Name: "a", Transport: "http", URL: "https://x/mcp", OAuth: &OAuthApp{ClientSecret: "s"}}, nil, "client ID"},
 		{Server{Name: "a", Transport: "http", URL: "https://x/mcp", OAuth: &OAuthApp{ClientID: "id", CallbackPort: 70000}}, nil, "callback port"},
+		{Server{Name: "a", Transport: "http", URL: "https://x/mcp", OAuth: &OAuthApp{ClientName: " Claude Code "}}, &OAuthApp{ClientName: "Claude Code"}, ""},
+		{Server{Name: "a", Transport: "http", URL: "https://x/mcp", OAuth: &OAuthApp{ClientName: "Claude\nCode"}}, nil, "client name"},
 	} {
 		s := c.s
 		err := s.check()

@@ -2957,7 +2957,7 @@ magpie.plugin("library", (ctx) => {
   // the start of mcpauth.ErrNoRegistration
   const NO_REGISTRATION = "the server's sign-in doesn't let an app register itself";
   // a server's own OAuth app, to tell a changed one: "" for none
-  const appOf = (x) => (x?.transport === "http" && x.oauth?.clientId ? JSON.stringify([x.oauth.clientId, x.oauth.clientSecret || "", x.oauth.callbackPort || 0]) : "");
+  const appOf = (x) => (x?.transport === "http" && (x.oauth?.clientId || x.oauth?.clientName) ? JSON.stringify([x.oauth.clientId || "", x.oauth.clientSecret || "", x.oauth.callbackPort || 0, x.oauth.clientName || ""]) : "");
 
   function editServer(s, prefill) {
     const all = mcpAgents();
@@ -3000,7 +3000,7 @@ magpie.plugin("library", (ctx) => {
       drawApp();
       appBox.querySelector("input")?.focus();
     };
-    let appOpen = !!d.oauth?.clientId, appBox = null, appHint = null;
+    let appOpen = !!(d.oauth?.clientId || d.oauth?.clientName), appBox = null, appHint = null;
     // the user's own OAuth app, by Claude Code's names (--client-id,
     // --client-secret, --callback-port)
     function drawApp() {
@@ -3023,11 +3023,17 @@ magpie.plugin("library", (ctx) => {
       });
       port.inputMode = "numeric";
       port.classList.add("port");
-      for (const [i, l] of [[id, t("Client ID")], [secret, t("Client secret")], [port, t("Callback port")]]) i.setAttribute("aria-label", l);
+      const clientName = field2(d.oauth?.clientName, "Magpie", (v) => {
+        const n = v.trim();
+        if (n) a().clientName = n;
+        else delete a().clientName;
+        signBox?.redraw();
+      });
+      for (const [i, l] of [[id, t("Client ID")], [secret, t("Client secret")], [port, t("Callback port")], [clientName, t("Client name")]]) i.setAttribute("aria-label", l);
       const x = button("", "lib-x", () => { d.oauth = s?.oauth ? null : undefined; appOpen = false; drawApp(); signBox?.redraw(); });
       x.append(svg("M4.5 4.5l7 7M11.5 4.5l-7 7", 11, 1.6));
       x.title = t("Remove");
-      appBox.append(id, secret, port, x);
+      appBox.append(id, secret, port, clientName, x);
       if (hint) hint.textContent = callback();
     }
     const callback = () => t("Made with its vendor (GitHub's under Settings › Developer settings › OAuth Apps), with {url} as its callback URL", { url: "http://localhost" + (d.oauth?.callbackPort ? ":" + d.oauth.callbackPort : "") + "/callback" });
@@ -3184,7 +3190,7 @@ magpie.plugin("library", (ctx) => {
     const send = async () => {
       const body = { old: s ? s.name : "", server: { name: d.name, transport: d.transport, agents: d.agents, startupTimeout: d.startupTimeout || 0, local: !!d.local, hub: d.hub || "", note: d.note || "" } };
       if (d.transport === "stdio") Object.assign(body.server, { command: d.command, args: d.args, env: d.env });
-      else Object.assign(body.server, { url: d.url, headers: d.headers, oauth: d.transport === "http" && d.oauth?.clientId ? d.oauth : null });
+      else Object.assign(body.server, { url: d.url, headers: d.headers, oauth: d.transport === "http" && (d.oauth?.clientId || d.oauth?.clientName) ? d.oauth : null });
       take(await api("library/servers/save", body));
       const was = s;
       s = lib.servers.find((x) => x.name === d.name) || s;
