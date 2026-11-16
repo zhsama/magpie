@@ -1,13 +1,19 @@
 name: Sync upstream
 
+# Merges yetone/magpie's main into this fork's main, checks what the fork
+# keeps (.github/fork-check.sh), pushes, and releases the fork at upstream's
+# latest version when it isn't out yet (release-fork.yml, in this run: its
+# failure fails the run, and a second sync waits for it). When the merge or
+# the check fails, nothing is pushed and the run's summary says what to do.
+
 on:
   schedule:
-    # Monday 09:00 JST
-    - cron: "0 0 * * 1"
+    # daily, 09:17 JST: off the hour, when GitHub drops fewer scheduled runs
+    - cron: "17 0 * * *"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   actions: write
 
 concurrency:
@@ -17,61 +23,146 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+      version: ${{ steps.release.outputs.version }}
+      release: ${{ steps.release.outputs.release }}
     steps:
+      # GITHUB_TOKEN may not push a commit that changes .github/workflows,
+      # and upstream's main changes them often
+      - name: Check the push token
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "::error::Set the SYNC_TOKEN secret: a fine-grained token for this repository with Contents and Workflows read and write."
+            exit 1
+          fi
+
+      # the token that may push stays out of .git/config while upstream's
+      # code runs in the check: only the Push step has it
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: main
+          persist-credentials: false
 
       - name: Merge upstream
-        id: sync
+        id: merge
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/yetone/magpie.git
-          git fetch upstream main
-          git fetch origin personal
+          # upstream tags its commits on main: the newest tag before the
+          # fetch is on what the fetch brings
+          ver=$(git ls-remote --tags --refs upstream 'v*' \
+            | awk -F/ '$3 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ {print $3}' \
+            | sort -V | tail -1)
+          ver="${ver#v}"
+          [ -n "$ver" ]
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          git fetch --no-tags upstream main
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "main is current"
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git merge --no-edit -m "merge upstream main" upstream/main
+          echo "updated=true" >> "$GITHUB_OUTPUT"
 
-          merge_branch() {
-            local branch="$1"
-            local flag="$2"
-            git checkout -B "$branch" "origin/$branch"
-            if git merge-base --is-ancestor upstream/main HEAD; then
-              echo "${branch} is current"
-              echo "${flag}=false" >> "$GITHUB_OUTPUT"
-              return 0
-            fi
-            if ! git merge --no-edit -m "merge upstream main" upstream/main; then
-              echo "conflict merging upstream/main into ${branch}" >&2
-              git diff --name-only --diff-filter=U >&2
-              exit 1
-            fi
-            git push origin "HEAD:${branch}"
-            echo "${flag}=true" >> "$GITHUB_OUTPUT"
-          }
+      - uses: actions/setup-go@v5
+        if: steps.merge.outputs.updated == 'true'
+        with:
+          go-version-file: go.mod
 
-          merge_branch main main_updated
-          merge_branch personal personal_updated
+      - name: Check what the fork keeps
+        id: check
+        if: steps.merge.outputs.updated == 'true'
+        run: .github/fork-check.sh
 
-      - name: Build macOS app
-        if: steps.sync.outputs.personal_updated == 'true'
+      - name: Push
+        if: steps.merge.outputs.updated == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run macos.yml --ref personal --repo "${GITHUB_REPOSITORY}"
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: git push "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
 
-      - name: Publish this fork at the upstream version
+      # GitHub keeps a workflow on or off by its file: one upstream adds or
+      # renames comes in on, and would run here
+      - name: Keep only the fork's workflows on
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ver=$(git ls-remote --tags https://github.com/yetone/magpie.git \
-            | awk -F/ '/refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {print $3}' \
-            | sort -V | tail -1)
-          ver="${ver#v}"
-          [ -n "$ver" ]
-          if gh release view "v$ver" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "v$ver is already published"
-            exit 0
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows" --jq '
+            .workflows[] | select(.state == "active") | .path
+            | select(startswith(".github/workflows/")) | split("/") | last
+            | select(IN("test.yml", "macos.yml", "sync-upstream.yml", "release-fork.yml") | not)' \
+            | while read -r f; do
+                if gh workflow disable "$f" --repo "$GITHUB_REPOSITORY"; then
+                  echo "turned off $f" | tee -a "$GITHUB_STEP_SUMMARY"
+                else
+                  echo "::warning::could not turn off $f"
+                fi
+              done
+
+      # also when main was current: a release that failed before goes again
+      - name: Is upstream's version out here?
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.merge.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if out=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json tagName 2>&1); then
+            echo "v$VERSION is out already"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          elif grep -q 'release not found' <<<"$out"; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$out" >&2
+            exit 1
           fi
-          gh workflow run release-fork.yml --ref main -f version="$ver"
+
+      - name: Say what to do
+        if: failure() && (steps.merge.outcome == 'failure' || steps.check.outcome == 'failure')
+        env:
+          MERGE: ${{ steps.merge.outcome }}
+        run: |
+          {
+            echo "### Nothing was pushed"
+            echo
+            conflicts=$(git diff --name-only --diff-filter=U 2>/dev/null || true)
+            if [ -n "$conflicts" ]; then
+              echo "Merging upstream/main conflicts in:"
+              echo
+              echo "$conflicts" | sed 's/^/- `/; s/$/`/'
+            elif [ "$MERGE" = failure ]; then
+              echo "The Merge upstream step failed before merging: see its log."
+            else
+              echo "The merge went in, but .github/fork-check.sh failed: see its step."
+            fi
+            echo
+            echo "Merge it in your clone, keeping the fork's changes, and run the sync again to release it:"
+            echo
+            echo '```sh'
+            echo 'git switch main && git pull'
+            echo 'git fetch --no-tags upstream && git merge --no-commit -m "merge upstream main" upstream/main'
+            echo '# resolve and git add, then'
+            echo '.github/fork-check.sh && git commit --no-edit && git push'
+            echo "gh workflow run sync-upstream.yml --repo $GITHUB_REPOSITORY"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    needs: sync
+    if: needs.sync.outputs.release == 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/release-fork.yml
+    with:
+      version: ${{ needs.sync.outputs.version }}
+      sha: ${{ needs.sync.outputs.sha }}

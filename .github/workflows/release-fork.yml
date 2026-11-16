@@ -1,10 +1,24 @@
 name: Release fork
 
 # The upstream release workflow builds yetone/magpie-releases and copies it
-# back. This one builds personal, where the fork's own changes live, and
-# publishes that tree at the same version number.
+# back. This one builds a commit of this fork's main, with the fork's own
+# changes, and publishes it under upstream's version number. The sync runs
+# it (workflow_call) with the commit it pushed; started by hand, it builds
+# the head of the branch it is started on.
+#
+# The builds say v<version>-0-g<commit>: update.Released takes that for a
+# build from source, so a fork build never updates itself, or a Remote
+# magpie, to upstream's official build.
 
 on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:
@@ -16,37 +30,74 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: release-fork-${{ inputs.version }}
+  cancel-in-progress: false
+
 jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      build: ${{ steps.meta.outputs.build }}
+    steps:
+      - name: Version and commit
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::v$VERSION is out already"
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "build=v$VERSION-0-g${SHA:0:7}" >> "$GITHUB_OUTPUT"
+
   cli:
+    needs: meta
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: personal
+          ref: ${{ needs.meta.outputs.sha }}
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
+      # a push by hand may not have run it
+      - name: Check what the fork keeps
+        run: .github/fork-check.sh
+
       - name: Build the terminal binaries
         env:
-          VERSION: v${{ inputs.version }}
+          BUILD: ${{ needs.meta.outputs.build }}
         run: |
           set -euo pipefail
-          [[ "${VERSION#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          make release-cli VERSION="$VERSION"
+          make release-cli VERSION="$BUILD"
+          if LC_ALL=C grep -alE 'phc_[A-Za-z0-9]{40,}' dist/*; then
+            echo "a posthog key is linked" >&2
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: cli
           path: dist/*
+          if-no-files-found: error
 
   mac:
+    needs: meta
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: personal
+          ref: ${{ needs.meta.outputs.sha }}
 
       - uses: actions/setup-go@v5
         with:
@@ -54,14 +105,15 @@ jobs:
 
       - name: Build and pack the app
         env:
-          VERSION: v${{ inputs.version }}
+          BUILD: ${{ needs.meta.outputs.build }}
         run: |
           set -euo pipefail
-          [[ "${VERSION#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          make app VERSION="$VERSION"
+          make app VERSION="$BUILD"
           test "$(uname -m)" = "arm64"
-          if strings -a magpie.app/Contents/MacOS/magpie | grep -q phc_nyDy; then
-            echo "posthog key is linked" >&2
+          # no pipe: grep -q would end strings early, and pipefail read
+          # its SIGPIPE as no match
+          if LC_ALL=C grep -aqE 'phc_[A-Za-z0-9]{40,}' magpie.app/Contents/MacOS/magpie; then
+            echo "a posthog key is linked" >&2
             exit 1
           fi
           id=$(plutil -extract CFBundleIdentifier raw magpie.app/Contents/Info.plist)
@@ -69,24 +121,22 @@ jobs:
           ditto -c -k --keepParent magpie.app "magpie-darwin-arm64.zip"
           hdiutil create -volname magpie -srcfolder magpie.app -ov -format UDZO "magpie-darwin-arm64.dmg"
 
-      - name: Attach the app once the release exists
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: v${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          for _ in $(seq 1 60); do
-            gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && break
-            sleep 10
-          done
-          gh release upload "$VERSION" magpie-darwin-arm64.zip magpie-darwin-arm64.dmg --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            magpie-darwin-arm64.zip
+            magpie-darwin-arm64.dmg
+          if-no-files-found: error
 
+  # pushed only once the binaries built and passed their checks
   docker:
+    needs: [meta, cli, mac]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: personal
+          ref: ${{ needs.meta.outputs.sha }}
 
       - uses: docker/login-action@v4
         with:
@@ -96,23 +146,25 @@ jobs:
 
       - name: Build and push the server image
         env:
-          VERSION: v${{ inputs.version }}
+          VERSION: ${{ inputs.version }}
+          BUILD: ${{ needs.meta.outputs.build }}
           IMAGE: ghcr.io/zhsama/magpie
         run: |
           set -euo pipefail
-          [[ "${VERSION#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          docker build --build-arg "VERSION=$VERSION" \
-            -t "$IMAGE:${VERSION#v}" -t "$IMAGE:latest" .
-          docker push "$IMAGE:${VERSION#v}"
+          docker build --build-arg "VERSION=$BUILD" \
+            -t "$IMAGE:$VERSION" -t "$IMAGE:latest" .
+          docker push "$IMAGE:$VERSION"
           docker push "$IMAGE:latest"
 
+  # only with every build in hand: a release is whole, or it isn't out
+  # and the next sync makes it again
   publish:
-    needs: [cli, docker]
+    needs: [meta, cli, mac, docker]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: personal
+          ref: ${{ needs.meta.outputs.sha }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -123,12 +175,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: v${{ inputs.version }}
+          BUILD: ${{ needs.meta.outputs.build }}
+          SHA: ${{ needs.meta.outputs.sha }}
         run: |
           set -euo pipefail
           cd dist
           sha256sum * > SHA256SUMS
           notes=$(printf '%s\n' \
-            "Fork of yetone/magpie at $VERSION, with the daily PostHog count removed." \
+            "Fork of yetone/magpie at $VERSION, with the daily PostHog count removed. Built as $BUILD." \
             "The macOS app is unsigned and arm64 only." \
             "Server image: ghcr.io/zhsama/magpie:${VERSION#v} (linux/amd64).")
-          gh release create "$VERSION" --target personal --title "magpie $VERSION" --notes "$notes" ./*
+          gh release create "$VERSION" --target "$SHA" --title "magpie $VERSION" --notes "$notes" ./*

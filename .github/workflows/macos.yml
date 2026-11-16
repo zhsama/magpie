@@ -2,7 +2,7 @@ name: macOS
 
 on:
   push:
-    branches: [main, personal]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -41,7 +41,7 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = "arm64"
           bin=magpie.app/Contents/MacOS/magpie
-          if strings -a "$bin" | grep -q phc_nyDy; then
+          if LC_ALL=C grep -aqE 'phc_[A-Za-z0-9]{40,}' "$bin"; then
             echo "posthog key is linked" >&2
             exit 1
           fi
