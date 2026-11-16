@@ -391,11 +391,19 @@ type Weighed struct {
 	// Barred: left out as the user set it not to serve the model, its
 	// own list of models leaving it out (#474)
 	Barred bool `json:"barred,omitempty"`
+	// StandIn: left out as its provider never takes another model's
+	// request (provider.NoStandIn), and a provider not so marked was
+	// planned before it (standInsOut)
+	StandIn bool `json:"standIn,omitempty"`
 	// Held: left out as the gateway key asking may not use its account or
 	// key (#905), or a routing group it was reached through is held to
 	// other accounts (Group.Accounts): HeldBy names that group
 	Held   bool   `json:"held,omitempty"`
 	HeldBy string `json:"heldBy,omitempty"`
+	// HeldOwn: HeldBy's group names this model on another account of
+	// its provider (Member.Account, EastonXvii on X), rather than holding
+	// the whole group to some
+	HeldOwn bool `json:"heldOwn,omitempty"`
 	// Capped: left out as held at the usage cap the user set on the
 	// account, this cap in percent; Used is then its fullest window's
 	// share, CapBack when the last window at or past it renews
@@ -409,6 +417,10 @@ type Weighed struct {
 	// NoCredits: held at 100% (Capped), a Codex account the user set not
 	// to spend its credits once its allowance is used up
 	NoCredits bool `json:"noCredits,omitempty"`
+	// ExtraUsage: beside NoCredits, a Claude account held so as it is set
+	// not to spend extra usage, or its extra usage is at the cap set on
+	// its Usage credits (provider.ClaudeExtraUsage)
+	ExtraUsage bool `json:"extraUsage,omitempty"`
 	// Unread: held (Capped) by a careful provider as its usage can't be
 	// told, why: not read yet, the read failed, or too old near its cap
 	// (provider.Provider.CapCareful)
@@ -457,6 +469,10 @@ type Weighed struct {
 	// from Renews' biggest first: a row says the two together, so of one
 	// window, a Factory account's week and not its month (#1778)
 	UsedRenews *time.Time `json:"usedRenews,omitempty"`
+	// UsedWindow: the name of the window Used is the share of, when more
+	// than one counts the model: the row says it with the share, so a
+	// week's 41% isn't read as the five hours' (Wing8Aqua on X)
+	UsedWindow string `json:"usedWindow,omitempty"`
 	// Sunk: when it was rate limited with quota left, sending it to the
 	// back of an order that sinks (sink.go); nil when it didn't, or the
 	// order doesn't sink
@@ -495,6 +511,12 @@ type Try struct {
 	// client didn't, so it has no Net and the Routing page says why
 	// (sentBy)
 	SentBy string `json:"sentBy,omitempty"`
+	// Entry: how Claude Code ran a Claude subscription's request, "tui" for
+	// its interactive mode or "print" for claude -p, whose cost to the
+	// plan differs; EntryWhy is claudePrint's code for why it was -p
+	// (claude_entry.go). "" for a try that ran no Claude Code.
+	Entry    string `json:"entry,omitempty"`
+	EntryWhy string `json:"entryWhy,omitempty"`
 	// FirstReasoning is the start of paced visible reasoning, absent for hidden reasoning.
 	FirstReasoning  int64 `json:"firstReasoning,omitempty"`
 	ReasoningHidden bool  `json:"reasoningHidden,omitempty"`
@@ -623,6 +645,7 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 			ur := l.fullest
 			w.UsedRenews = &ur
 		}
+		w.UsedWindow = l.fullestName
 		if l.of > 0 {
 			w.Amount, w.Limit, w.Unit = l.amount, l.of, l.unit
 		}

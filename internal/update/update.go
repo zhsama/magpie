@@ -24,7 +24,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -33,9 +32,11 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/rosetta"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/source"
 )
 
@@ -48,7 +49,7 @@ func Feed() string {
 	if f := os.Getenv("MAGPIE_UPDATE_FEED"); f != "" {
 		return f
 	}
-	return Site + "/api/latest"
+	return siteFeed
 }
 
 // Release is one published version.
@@ -57,6 +58,8 @@ type Release struct {
 	Notes   string           `json:"notes"`   // markdown
 	URL     string           `json:"url"`     // the release page
 	Assets  map[string]Asset `json:"assets"`  // by file name
+	// Signed is what vouches for Assets' hashes (signed.go).
+	Signed *Signed `json:"signed,omitempty"`
 }
 
 // Asset is one downloadable file of a release.
@@ -71,6 +74,9 @@ type Asset struct {
 	// site's copy on R2): where a download goes on when URL fails, and
 	// what a mirror the user gave is put in front of.
 	GitHub string `json:"github,omitempty"`
+	// attest is set by Release.verify for a file of a release that carries
+	// GitHub build attestations (attest.go): download checks it.
+	attest bool
 }
 
 // client asks the feed and downloads a release through the proxy the rest
@@ -94,7 +100,31 @@ func fileClient() *http.Client {
 func proxied() http.RoundTripper {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.Proxy = netproxy.Func
-	return netproxy.Dispatch(t)
+	// a root the user gave in SSL_CERT_FILE (dev-sidecar and the like) is
+	// trusted beside the system's; the file is still checked against the
+	// feed's SHA-256 and, on macOS, the signer
+	netproxy.TrustEnvRoots(t)
+	return updateProxy{netproxy.Dispatch(t)}
+}
+
+// updateProxy has a request that names no proxy of its own (WithProxy,
+// magpie update --proxy) go through Settings' UpdateProxy when it is set
+// (moonlityu on X: models direct, updates through a proxy); unset, it
+// follows the global proxy as updates always did.
+type updateProxy struct{ http.RoundTripper }
+
+func (u updateProxy) RoundTrip(req *http.Request) (*http.Response, error) {
+	if c := strings.TrimSpace(settings.Shared().UpdateProxy); c != "" && netproxy.Choice(req.Context()) == "" {
+		req = req.WithContext(netproxy.With(req.Context(), c))
+	}
+	return u.RoundTripper.RoundTrip(req)
+}
+
+// CloseIdleConnections passes on to the transport underneath.
+func (u updateProxy) CloseIdleConnections() {
+	if c, ok := u.RoundTripper.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
 }
 
 // Latest asks the feed for the newest release, its notes in English.
@@ -104,7 +134,58 @@ func Latest(ctx context.Context) (*Release, error) { return LatestIn(ctx, "") }
 // InLang): the app's language, which What's new follows. On Settings'
 // Stable channel it is Stable's release (see Stable).
 func LatestIn(ctx context.Context, lang string) (*Release, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", withChannel(withLang(Feed(), lang)), nil)
+	return latestAt(ctx, withChannel(withLang(Feed(), lang)), lang)
+}
+
+// LatestEvery is LatestIn on every version, whatever Settings' channel:
+// what Stable's "up to date" leaves out, the newest release out.
+func LatestEvery(ctx context.Context, lang string) (*Release, error) {
+	return latestAt(ctx, withLang(Feed(), lang), lang)
+}
+
+// LatestStable is the Stable channel's release, whatever Settings'
+// channel: what a fresh install compares itself with, to stay on Stable
+// when it is Stable's version (the site's Stable download). Only the site
+// knows it, so a failed feed is never answered from GitHub.
+func LatestStable(ctx context.Context) (*Release, error) {
+	u, err := url.Parse(Feed())
+	if err != nil {
+		return nil, err
+	}
+	q := u.Query()
+	q.Set("channel", settings.UpdateStable)
+	u.RawQuery = q.Encode()
+	return latestFrom(ctx, u.String(), "")
+}
+
+func latestAt(ctx context.Context, feed, lang string) (*Release, error) {
+	if githubOnly() {
+		return githubLatest(ctx, lang)
+	}
+	if !fallsBack(ctx) {
+		return latestFrom(ctx, feed, lang)
+	}
+	// the site may be unreachable where github.com is (a company's allow
+	// list): after a failed feed, GitHub's own release is read and held
+	// to the same signature (fallback.go)
+	fctx, cancel := context.WithTimeout(ctx, feedWait)
+	defer cancel()
+	rel, err := latestFrom(fctx, feed, lang)
+	if err == nil {
+		return rel, nil
+	}
+	if ctx.Err() != nil {
+		return nil, err
+	}
+	rel, gerr := githubLatest(ctx, lang)
+	if gerr != nil {
+		return nil, fmt.Errorf("%w (and GitHub: %v)", err, gerr)
+	}
+	return rel, nil
+}
+
+func latestFrom(ctx context.Context, feed, lang string) (*Release, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", feed, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +204,11 @@ func LatestIn(ctx context.Context, lang string) (*Release, error) {
 	if parse(r.Version) == nil {
 		return nil, fmt.Errorf("update feed: no version")
 	}
+	if err := r.verify(); err != nil {
+		return nil, fmt.Errorf("update feed: %w", err)
+	}
 	r.Notes = InLang(r.Notes, lang)
+	r.githubAddresses()
 	return &r, nil
 }
 
@@ -136,7 +221,7 @@ func Released(v string) bool {
 }
 
 // describe matches what git describe adds after a tag: commits since, hash.
-var describe = regexp.MustCompile(`^\d+-g[0-9a-f]+`)
+var describe = lazyre.New(`^\d+-g[0-9a-f]+`)
 
 // Newer reports whether version a comes after b. A pre-release comes before
 // the release it leads up to.
@@ -493,7 +578,7 @@ func relaunchScript(bundle string, window, quiet bool, log string, waits []strin
 }
 
 // bundleExecutableKey finds the program an app's Info.plist names.
-var bundleExecutableKey = regexp.MustCompile(`<key>CFBundleExecutable</key>\s*<string>([^<]+)</string>`)
+var bundleExecutableKey = lazyre.New(`<key>CFBundleExecutable</key>\s*<string>([^<]+)</string>`)
 
 // bundleExecutable is the name of the program in bundle's Contents/MacOS:
 // the one its Info.plist names, else this one's own when it runs from
@@ -1070,7 +1155,7 @@ func RelaunchArgs(window bool, view string) []string {
 }
 
 // AwaitPredecessor blocks, for a while at most, until the magpie that
-// relaunched this one has exited.
+// relaunched this one has exited; on Windows its WebView2 too (awaitGone).
 func AwaitPredecessor() {
 	reportStarted() // first: the one that started this waits for it
 	pid, err := strconv.Atoi(os.Getenv("MAGPIE_REPLACES"))
@@ -1078,9 +1163,7 @@ func AwaitPredecessor() {
 	if err != nil || pid <= 0 {
 		return
 	}
-	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline) && alive(pid); {
-		time.Sleep(100 * time.Millisecond)
-	}
+	awaitGone(pid)
 }
 
 type progressKey struct{}
@@ -1141,6 +1224,10 @@ func download(ctx context.Context, a Asset, path string) error {
 	if a.SHA256 == "" {
 		return errors.New("the release lists no checksum for " + filepath.Base(path))
 	}
+	// the attestation of the signed checksum, before the bytes are fetched
+	if err := attestedFile(ctx, a, filepath.Base(path)); err != nil {
+		return err
+	}
 	// a file left by an earlier run is no part of this one; one that can't
 	// go is said so here, not asked to go on from its end (416)
 	if err := clearFile(path); err != nil {
@@ -1156,6 +1243,16 @@ func download(ctx context.Context, a Asset, path string) error {
 	on, viaAPI := a, false
 	toGitHub := a.GitHub != "" && a.GitHub != a.URL
 	toAPI := mirrorOf(ctx) == ""
+	// Settings' update source (source.go): GitHub only starts at github.com
+	// and goes on to its API route; the site only goes to no other
+	switch Source() {
+	case settings.UpdateSourceGitHub:
+		if toGitHub {
+			on.URL, toGitHub = a.GitHub, false
+		}
+	case settings.UpdateSourceSite:
+		toGitHub, toAPI = false, false
+	}
 	var before []string // each route left, and how it failed
 	for try := 0; try <= len(retryWaits); try++ {
 		if try > 0 {
@@ -1371,6 +1468,15 @@ func fetch(ctx context.Context, a Asset, path string) error {
 			have = 0
 			continue
 		}
+		if res.StatusCode == http.StatusPartialContent && have > 0 && !restarted && !strings.HasPrefix(res.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-", have)) {
+			// a 206 that doesn't say it starts where it was asked to (a
+			// host whose Content-Range is bytes NaN-NaN/…, usemagpie.ai
+			// before 0.1.3733): what came can't be laid after what was kept,
+			// so once more, whole
+			res.Body.Close()
+			have = 0
+			continue
+		}
 		break
 	}
 	defer res.Body.Close()
@@ -1493,4 +1599,17 @@ func openBeside(bundle string, window, quiet bool) string {
 func StartBeside(exe string, window bool, view string) error {
 	_, _, err := launch(exe, RelaunchArgs(window, view), os.Environ())
 	return err
+}
+
+// githubAddresses gives each file the feed names on the site its
+// github.com address, where download goes on when the site's can't be
+// reached; the hash it is checked against is the same.
+func (rel *Release) githubAddresses() {
+	for name, a := range rel.Assets {
+		if a.GitHub != "" || rel.Version == "" || !strings.HasPrefix(a.URL, Site+"/") {
+			continue
+		}
+		a.GitHub = fmt.Sprintf("%s/%s/releases/download/v%s/%s", githubWeb, releaseRepo, rel.Version, url.PathEscape(name))
+		rel.Assets[name] = a
+	}
 }

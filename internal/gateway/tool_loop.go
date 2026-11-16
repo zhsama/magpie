@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -52,7 +52,7 @@ var toolResultMarks = map[provider.Protocol][][]byte{
 // stoppedToolLoop answers r here when its conversation is stuck in a tool
 // loop, and says whether it did.
 func (s *Server) stoppedToolLoop(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) bool {
-	if settings.Load().NoLoopGuard || !mayLoop(from, body) {
+	if settings.Shared().NoLoopGuard || !mayLoop(from, body) {
 		return false
 	}
 	req, err := parse(from, tailOf(from, body))
@@ -335,7 +335,7 @@ func resultSum(p Part) string {
 		b.WriteString("error\x00")
 	}
 	b.WriteString(steadyResult(p.Text))
-	for _, im := range p.Images {
+	for _, im := range append(slices.Clone(p.Images), p.Audio...) {
 		b.WriteString("\x00" + im.MediaType + im.Data + im.URL)
 	}
 	return b.String()
@@ -347,12 +347,12 @@ func resultSum(p Part) string {
 // id, and its shell's duration_seconds.
 var runNoise = []struct {
 	mark string // in a result the expression may change
-	re   *regexp.Regexp
+	re   *lazyre.RE
 	with string
 }{
-	{"Wall time", regexp.MustCompile(`(?m)^(Wall time:? )[0-9.]+( seconds?)`), "${1}#${2}"},
-	{"Chunk ID: ", regexp.MustCompile(`(?m)^(Chunk ID: )\S+`), "${1}#"},
-	{`"duration_seconds"`, regexp.MustCompile(`("duration_seconds"\s*:\s*)[0-9.eE+-]+`), "${1}#"},
+	{"Wall time", lazyre.New(`(?m)^(Wall time:? )[0-9.]+( seconds?)`), "${1}#${2}"},
+	{"Chunk ID: ", lazyre.New(`(?m)^(Chunk ID: )\S+`), "${1}#"},
+	{`"duration_seconds"`, lazyre.New(`("duration_seconds"\s*:\s*)[0-9.eE+-]+`), "${1}#"},
 }
 
 func steadyResult(s string) string {

@@ -449,13 +449,19 @@ func (a *Account) Tiers(model string) (tiers []string, ok bool) {
 // high, doesn't lower the request a Plus one beside it answers (#520). The
 // gateway sends each account only the models and levels its own list has
 // (Account.Lists, Account.Levels) first.
-func codexPoolModels(ms []catalog.Model) []catalog.Model {
+func codexPoolModels(ms []catalog.Model) []catalog.Model { return poolModels("codex", ms) }
+
+// poolModels is ms, the list of agent's account in use first, with what
+// the agent's other accounts on add to it, as codexPoolModels says: a
+// Copilot account's plan lists other models than another's too
+// (copilotPoolModels).
+func poolModels(agent string, ms []catalog.Model) []catalog.Model {
 	var lists [][]catalog.Model
-	for _, l := range Logins("codex") {
+	for _, l := range Logins(agent) {
 		if l.Active || !l.On {
 			continue
 		}
-		if live, _, ok := catalog.Live(accountModels("codex", l.User)); ok {
+		if live, _, ok := catalog.Live(accountModels(agent, l.User)); ok {
 			lists = append(lists, live)
 		}
 	}
@@ -655,6 +661,28 @@ func CodexNativeHidden() map[string]bool {
 	return out
 }
 
+// CodexOwnLeftOut is the rule for Show Codex's own models turned off
+// (OwnModelsHidden, iiiiiimone on X): it says of a slug in the sign-in's
+// list whether Codex's list leaves it out, so the picker offers magpie's
+// models alone. A model magpie serves on a ChatGPT account of the user's
+// stays, as the Agents page's picker keeps it (Served), and so does keep,
+// the one Codex is set to, which Codex would otherwise run on fallback
+// metadata. nil while the switch is on. Hidden jobs (codex-auto-review) are
+// the caller's to leave.
+func CodexOwnLeftOut(keep string) func(slug string) bool {
+	if !OwnModelsHidden("codex") {
+		return nil
+	}
+	shown, _ := CatalogFor("codex")
+	served := map[string]bool{keep: true}
+	for _, e := range shown {
+		if CodexOwn(e) {
+			served[e.Model] = true
+		}
+	}
+	return func(slug string) bool { return !served[slug] }
+}
+
 // CodexOrder is where each model of Codex's list goes when the user put
 // them in an order of their own on the Agents page (#855), by the slug
 // Codex knows it by — a ChatGPT account's own by its bare one, as the
@@ -711,6 +739,10 @@ func buildCodexListTag(kind string) string {
 				ms = append(ms, catalog.Model{ID: "+" + e.ID})
 			}
 		}
+	}
+	// and Codex's own models left out of its list (OwnModelsHidden)
+	if OwnModelsHidden("codex") {
+		ms = append(ms, catalog.Model{ID: "~ownoff"})
 	}
 	off := slices.Sorted(maps.Keys(CodexNativeHidden()))
 	for _, slug := range off {
@@ -805,9 +837,10 @@ func CodexNativePicked() (map[string]bool, bool) {
 func CodexNativeWindow(restore bool) func(slug string) (n, most int, ok bool) {
 	p, _ := find(All(), "codex")
 	live, _, _ := catalog.Live("codex")
+	capped := settings.Shared()
 	return func(slug string) (int, int, bool) {
 		if n := p.ContextOf(slug); n > 0 {
-			return n, 0, true
+			return capped.CappedOwn(n), 0, true
 		}
 		if !restore {
 			return 0, 0, false
@@ -817,7 +850,7 @@ func CodexNativeWindow(restore bool) func(slug string) (n, most int, ok bool) {
 				// a list without the max (saved before magpie kept
 				// it) leaves the cache's own; Window still raises it to
 				// the window when it's below
-				return m.Context, m.MaxContext, true
+				return capped.Capped(m.Context), capped.Capped(m.MaxContext), true
 			}
 		}
 		return 0, 0, false
@@ -835,8 +868,9 @@ func CodexNativeWindow(restore bool) func(slug string) (n, most int, ok bool) {
 // Codex Plus account.
 func CodexWindow(user, slug string) int {
 	p, _ := find(All(), "codex")
+	capped := settings.Shared()
 	if n := p.ContextOf(slug); n > 0 {
-		return n
+		return capped.CappedOwn(n)
 	}
 	var lists [][]catalog.Model
 	if user != "" {
@@ -851,7 +885,7 @@ func CodexWindow(user, slug string) int {
 	for _, ms := range lists {
 		for _, m := range ms {
 			if n := catalog.Window(m.Context); m.ID == slug && n > 0 {
-				return n
+				return capped.Capped(n)
 			}
 		}
 	}
@@ -864,6 +898,13 @@ func CodexWindow(user, slug string) int {
 func codexWindowsTag() []catalog.Model {
 	p, _ := find(All(), "codex")
 	var out []catalog.Model
+	if n := settings.Shared().ContextCap; n > 0 {
+		id := "~cap"
+		if settings.Shared().ContextCapAll {
+			id = "~capall"
+		}
+		out = append(out, catalog.Model{ID: id, Context: n})
+	}
 	for _, k := range slices.Sorted(maps.Keys(p.Contexts)) {
 		out = append(out, catalog.Model{ID: "=" + k, Context: p.Contexts[k]})
 	}
@@ -883,7 +924,7 @@ func codexListedIf(shown []Entry, members func(id string) []Member, listed func(
 	var ms []catalog.Model
 	// named among all shown: the account's own, which the backend lists,
 	// are in Codex's picker beside these
-	labels := Labels(shown)
+	labels := LabelsFor("codex", shown)
 	seen := described()
 	s := settings.Load().ForAgent("codex")
 	find := func(id string) (Group, []Member, bool) { return Group{}, members(id), true }
@@ -895,6 +936,7 @@ func codexListedIf(shown []Entry, members func(id string) []Member, listed func(
 		m := catalog.Model{ID: e.ID, Name: labels[i], Efforts: CodexEfforts(e), Images: e.Images || seen, Context: e.Context, AgentsV2: e.AgentsV2, Codex: e.Codex, Apart: apart[i]}
 		m.Compact = CompactFor(s, e, find)
 		CodexTiers(&m, e, members)
+		CodexSeals(&m, e, members)
 		ms = append(ms, m)
 	}
 	return ms
@@ -1011,9 +1053,34 @@ func CodexTiers(m *catalog.Model, e Entry, members func(id string) []Member) {
 	}
 	// so is a model of its own that has one, which no tier above names
 	// (an Anthropic key's Opus, an OpenAI key's GPT, a Cursor account's)
-	if len(m.Tiers) == 0 && CanFast(e.Provider, e.Model) {
+	if len(m.Tiers) == 0 && CanFast(*e.Provider, e.Model) {
 		m.Tiers = []string{codexFastTier}
 	}
+}
+
+// CodexSeals sets m.Seals: e's provider, or a member of its group, is one
+// of no sign-in on the Responses API, which may seal a V2 lead's subagent
+// tasks as the ChatGPT backend does (#1109). A ChatGPT account's model says
+// so already (codex/, a group's Fast); another account's (Copilot) seals
+// none.
+func CodexSeals(m *catalog.Model, e Entry, members func(id string) []Member) {
+	if e.Group == "" {
+		m.Seals = maySeal(*e.Provider)
+		return
+	}
+	for _, mb := range members(e.ID) {
+		if maySeal(mb.Provider) {
+			m.Seals = true
+			return
+		}
+	}
+}
+
+// maySeal says p is of no sign-in and speaks the Responses API, as the
+// gateway's canSeal does (its Base, not Speaks: a list asks it of every
+// model).
+func maySeal(p Provider) bool {
+	return p.Account == nil && p.ID != "" && p.Base(Responses) != ""
 }
 
 // codexFastTier is Fast's service tier as Codex sends it.

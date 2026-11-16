@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Docker · magpie 文档</title>
+<title>用 Docker 部署 magpie：在服务器或 NAS 上跑 AI 网关 · magpie 文档</title>
 <meta name="description" content="在服务器或 NAS 上用 Docker 运行 magpie：ghcr.io/yetone/magpie 镜像的端口、数据卷和环境变量，Web 界面，登录订阅，用网关密钥共享网关，以及 Compose 示例。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -39,6 +39,54 @@
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/zh/docker">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "在 Docker 里运行 magpie",
+   "description": "在服务器或 NAS 上用 Docker 运行 magpie：ghcr.io/yetone/magpie 镜像的端口、数据卷和环境变量，Web 界面，登录订阅，用网关密钥共享网关，以及 Compose 示例。",
+   "inLanguage": "zh-CN",
+   "url": "https://usemagpie.ai/docs/zh/docker",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "在 Docker 里运行 magpie",
+     "item": "https://usemagpie.ai/docs/zh/docker"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -102,7 +150,7 @@
 
     <div class="table-wrap"><table>
       <tr><td><b>镜像</b></td><td><code>ghcr.io/yetone/magpie</code>，支持 <code>linux/amd64</code> 和 <code>linux/arm64</code></td></tr>
-      <tr><td><b>标签</b></td><td><code>latest</code>（最新正式版）、<code>daily</code>（每天北京时间 04:00 指向当时的最新正式版，一天只变一次）、<code>stable</code>（与桌面版的稳定版通道一致：每周一个已发布满三天的版本，紧急修复版立即跟上）、<code>0.1.1150</code>（某个版本）、<code>0.1</code>、<code>edge</code>（<code>main</code> 上的每次改动）</td></tr>
+      <tr><td><b>标签</b></td><td><code>latest</code>（最新正式版）、<code>daily</code>（与桌面版的每日版通道一致：每天北京时间 04:00 指向当时 CI 已通过的最新正式版，一天只变一次，紧急修复版立即跟上）、<code>stable</code>（与桌面版的稳定版通道一致：每周一个已发布满三天的版本，紧急修复版立即跟上）、<code>0.1.1150</code>（某个版本）、<code>0.1</code>、<code>edge</code>（<code>main</code> 上的每次改动）</td></tr>
       <tr><td><b>端口</b></td><td><code>3425</code> 是 Agent 调用的网关；<code>3430</code> 是容器运行 <code>magpie web</code> 时的 Web 界面；它也响应网关的 <code>/v1</code> 路由，所以反向代理只需转发这一个端口</td></tr>
       <tr><td><b>数据卷</b></td><td><code>/config</code>：供应商、密钥、登录、插件和用量</td></tr>
       <tr><td><b>用户</b></td><td>nonroot（uid 65532）</td></tr>

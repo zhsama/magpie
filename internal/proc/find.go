@@ -3,9 +3,11 @@ package proc
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
+	"slices"
 	"strings"
+
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // FindTool is the command-line tool name as a terminal would run it: on
@@ -101,7 +103,7 @@ func toolIn(name, goos string, dirs []string) string {
 // npmShimLine is the line of npm's sh shim (cmd-shim) that runs a program
 // of its package's directly: exec "$basedir/node_modules/<pkg>/<bin>" "$@".
 // A shim of a node script names node first, and isn't matched.
-var npmShimLine = regexp.MustCompile(`(?m)^\s*exec "\$basedir/([^"$]+\.exe)"\s+"\$@"`)
+var npmShimLine = lazyre.New(`(?m)^\s*exec "\$basedir/([^"$]+\.exe)"\s+"\$@"`)
 
 // npmShimExe is the Windows program the npm sh shim at path runs, where it
 // is: Claude Code's is node_modules\@anthropic-ai\claude-code\bin\claude.exe.
@@ -128,4 +130,72 @@ func npmShimExe(path string) string {
 		return ""
 	}
 	return exe
+}
+
+// bunBin is the folder `bun add -g` puts programs in when BUN_INSTALL says
+// where bun lives (a Windows user's bun is often installed elsewhere than
+// ~\.bun); "" without it, when ~/.bun/bin is the one.
+func bunBin() string {
+	if d := os.Getenv("BUN_INSTALL"); filepath.IsAbs(d) {
+		return filepath.Join(d, "bin")
+	}
+	return ""
+}
+
+// FindTools is every program for the command-line tool name this machine
+// has, in the order FindTool ranks them: each of PATH's folders, then the
+// folders a user's tools are installed in. One program found twice (a
+// link to it in two folders) is given once, where it comes first; a
+// version manager's wrapper script is given as the program it runs
+// (Unwrap). A machine can have two: a Claude Code installed with npm in
+// two Node versions, the first on PATH an old one `claude update` no
+// longer reaches (zi_xiang5806 on X). Kept as FindTool's answer is.
+func FindTools(name string) []string {
+	a := looked("findall\x00"+name, func() lookAnswer {
+		dirs := pathDirs()
+		if hung := hungDirs(dirs); hung != nil {
+			dirs = slices.DeleteFunc(slices.Clone(dirs), func(d string) bool { return hung[d] })
+		}
+		var found []string
+		seen := map[string]bool{}
+		add := func(p string) {
+			if p == "" {
+				return
+			}
+			key := p
+			if r, err := RealPath(p); err == nil {
+				key = r
+			}
+			if !seen[key] {
+				seen[key] = true
+				found = append(found, p)
+			}
+		}
+		if mayBeIn(name, dirs) {
+			for _, d := range dirs {
+				if d == "" || d == "." {
+					continue
+				}
+				if p, err := execLookPath(filepath.Join(d, name)); err == nil {
+					add(p)
+				}
+			}
+		}
+		if more := findDirs(); mayBeIn(name, more) {
+			for _, d := range more {
+				add(toolIn(name, runtime.GOOS, []string{d}))
+			}
+		}
+		return lookAnswer{path: strings.Join(found, "\x00")}
+	})
+	if a.path == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(a.path, "\x00") {
+		if p = Unwrap(name, p); !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }

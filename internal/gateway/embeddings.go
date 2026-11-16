@@ -134,7 +134,7 @@ func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, op
 		r = heldByGroup(r, g) // held to the group's accounts, if it is
 	}
 	keyWho, keyHeld := keyHolds(r)
-	if keyHeld && (isGroup && !groupAllowed(keyWho, g, ms) || !isGroup && !modelAllowed(keyWho, p, model)) {
+	if isGroup && !groupGiven(r, keyWho, keyHeld, g, ms) || keyHeld && !isGroup && !modelAllowed(keyWho, p, model) {
 		st, msg := keyModelRefusal(w, keyWho, asked)
 		call.Status, call.Error = st, msg
 		writeError(w, provider.Chat, st, msg)
@@ -222,7 +222,7 @@ func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, op
 	side := s.beginSide(r, start, asked, tries[0].p.ID, grp)
 	// unless every try is on this machine or the local network, set
 	// to go unmasked (provider.SkipsRedaction)
-	if slices.ContainsFunc(tries, func(c candidate) bool { return !c.p.SkipsRedaction() }) {
+	if slices.ContainsFunc(tries, func(c candidate) bool { return !c.unmasked() }) {
 		var done func()
 		var err error
 		var hits maskHits

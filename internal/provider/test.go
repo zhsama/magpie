@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/probelog"
 )
 
@@ -38,6 +38,14 @@ type Result struct {
 	// otherAPI: the vendor said the model isn't served on the API asked
 	// (catalog.WrongEndpoint), so another may be asked instead
 	otherAPI bool
+	// Queued is the vendor's queue message when a plugin's model was
+	// queued instead of answered (Qoder's "queued the request for ...").
+	// The model is served, so the test is OK: it waits where an agent's
+	// turn waits it out.
+	Queued string `json:"queued,omitempty"`
+	// V1 is the base the request was answered at once the /v1 it was
+	// typed without was added (missingV1): the editor's URL takes it
+	V1 string `json:"v1,omitempty"`
 }
 
 // Test sends the smallest possible request to each endpoint the vendor
@@ -255,7 +263,7 @@ func tinyBody(q Provider, proto Protocol, model string) (url, body string) {
 			// Factory's generate route. droid sends no stream field.
 			return q.Base(Gemini) + "/generate", fmt.Sprintf(`{"model":%q,"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, model)
 		}
-		return q.Gemini + GeminiPath(model, false), `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":16}}`
+		return q.Base(Gemini) + GeminiPath(model, false), `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":16}}`
 	}
 	return "", ""
 }
@@ -417,9 +425,24 @@ func (p Provider) testOne(ctx context.Context, model string) Result {
 	// (AccountsFor; #4992, scutken: a newapi pool's grok-4.7, served by
 	// its third account alone, was asked of the first and failed 503 "no
 	// available channel" while real requests were answered)
-	acct, ok := p.accountFor(model)
-	if !ok {
-		return Result{Model: model, Error: "every account that's on is set not to serve this model"}
+	var acct Provider
+	if ref := testOnRef(ctx); ref != "" && p.Account != nil {
+		// the account the user picked to test (TestOn)
+		var found bool
+		if acct, found = p.accountNamed(ref); !found {
+			return Result{Model: model, Error: fmt.Sprintf("no account %q that's on", ref)}
+		}
+	} else if ref != "" {
+		var found bool
+		if p, found = p.keyNamed(ref); !found {
+			return Result{Model: model, Error: "no such key that's on"}
+		}
+		acct = p
+	} else {
+		var ok bool
+		if acct, ok = p.accountFor(model); !ok {
+			return Result{Model: model, Error: "every account that's on is set not to serve this model"}
+		}
 	}
 	ctx, p = p.loggedAs(ctx, acct), acct
 	if p.isClaudeAccount() {
@@ -781,6 +804,34 @@ func (p Provider) ownRequests(ctx context.Context, kind string) context.Context 
 // write the status alone, so a failed test's row said nothing of why
 // (ysm119 on Discord: "no answer", and no error to find anywhere).
 func probe(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string, wait time.Duration) Result {
+	r := probeRetried(ctx, p, proto, url, body, model, wait)
+	if r.Account == "" {
+		r.Account = p.testedAccount()
+	}
+	return r
+}
+
+func probeRetried(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string, wait time.Duration) Result {
+	r := probeAt(ctx, p, proto, url, body, model, wait)
+	if r.Status != http.StatusNotFound {
+		return r
+	}
+	// a relay given without the /v1 it serves OpenAI's API under
+	// (Cyrus_4433 on X: claude-relay-service's …/openai, whose chat is at
+	// …/openai/v1/chat/completions, answered every model 404 Not Found)
+	// is asked there too, and an answer there sets the base right, so
+	// the gateway's requests go there as well
+	if base, at, ok := p.missingV1(proto, url); ok {
+		if v := probeAt(ctx, p, proto, at, body, model, wait); v.OK {
+			p.setV1(base)
+			v.V1 = base + "/v1"
+			return v
+		}
+	}
+	return r
+}
+
+func probeAt(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string, wait time.Duration) Result {
 	r := probeOnce(ctx, p, proto, url, body, model, wait)
 	if proto == Chat && r.Status == http.StatusBadRequest {
 		// a vendor whose 400 names the other reply-length field as the
@@ -791,7 +842,33 @@ func probe(ctx context.Context, p Provider, proto Protocol, url string, body []b
 			return probeOnce(ctx, p, proto, url, b, model, wait)
 		}
 	}
+	if (r.Status == http.StatusBadRequest || r.Status == http.StatusUnprocessableEntity) && StreamRequired([]byte(r.Error)) {
+		// a backend that only streams (a claude-relay-service's
+		// Responses, Cyrus_4433 on X: "Stream must be set to true") is
+		// asked once more streamed, as the gateway asks it
+		if b, ok := WithStream(body); ok {
+			return probeOnce(ctx, p, proto, url, b, model, wait)
+		}
+	}
 	return r
+}
+
+// missingV1 is the base of url, proto's endpoint at an OpenAI-style base
+// with no version in its path, and the same endpoint under that base's
+// /v1. Only a key's own base is asked so: a sign-in, a plugin, Azure,
+// Bedrock and Vertex AI have paths of their own, and a versioned base
+// (…/api/plan/v3) is the vendor's API as written (fixV1).
+func (p Provider) missingV1(proto Protocol, url string) (base, at string, ok bool) {
+	end := map[Protocol]string{Chat: "/chat/completions", Responses: "/responses"}[proto]
+	if end == "" || p.Account != nil || p.IsAzure() || p.IsBedrock() || p.IsVertex() {
+		return "", "", false
+	}
+	base, found := strings.CutSuffix(url, end)
+	if !found || base == "" || catalog.Versioned(base) || strings.TrimRight(base, "/") != strings.TrimRight(p.Base(proto), "/") {
+		return "", "", false
+	}
+	base = strings.TrimRight(base, "/")
+	return base, base + "/v1" + end, true
 }
 
 func probeOnce(ctx context.Context, p Provider, proto Protocol, url string, body []byte, model string, wait time.Duration) (r Result) {
@@ -959,6 +1036,14 @@ func probeOnce(ctx context.Context, p Provider, proto Protocol, url string, body
 	}
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	r.Error = APIError(b, res.Status)
+	if p.IsPlugin() && res.StatusCode == http.StatusServiceUnavailable && res.Header.Get("Retry-After") != "" && strings.Contains(strings.ToLower(r.Error), "queued") {
+		// asked not to wait (FallbackHeader), a plugin says its vendor's
+		// queue at once. A model in a queue is served, and an agent's
+		// turn waits it out: not a failed test (Mr7Faith on X: Qoder's
+		// models were red all day while queued)
+		r.OK, r.Queued, r.Error = true, r.Error, ""
+		return r
+	}
 	r.otherAPI = catalog.WrongEndpoint(res.StatusCode, b)
 	return r
 }
@@ -1041,7 +1126,7 @@ const BlockedHint = "the provider's network firewall blocked requests from this 
 // | … used Cloudflare to restrict access" page, and the plain-text
 // "error code: 1020" (and the other access-denied codes, 1005 to 1012) it
 // answers a client that takes no HTML.
-var edgeBlocked = regexp.MustCompile(`(?i)request has been blocked|errors\.aliyun\.com|you have been blocked|used cloudflare to restrict access|error code: 10(0[5-9]|1[0-2]|20)\b`)
+var edgeBlocked = lazyre.New(`(?i)request has been blocked|errors\.aliyun\.com|you have been blocked|used cloudflare to restrict access|error code: 10(0[5-9]|1[0-2]|20)\b`)
 
 // EdgeBlocked says whether an error body is a firewall's block page rather
 // than the vendor's API answering, or one already put in plain words.
@@ -1082,6 +1167,9 @@ func APIError(b []byte, fallback string) string {
 	if cmdGoNoAPI.Match(b) {
 		return apiError(b, fallback) + " — " + CommandCodeGoHint
 	}
+	if harnessOnly.Match(b) && !bytes.Contains(b, []byte(HarnessOnlyHint)) {
+		return apiError(b, fallback) + " — " + HarnessOnlyHint
+	}
 	return apiError(b, fallback)
 }
 
@@ -1090,17 +1178,17 @@ func APIError(b []byte, fallback string) string {
 // …" (#969). Go's key is only taken where Command Code's CLI asks, which
 // the Command Code plugin does; an API-key provider (the "commandcode"
 // preset) never can.
-var cmdGoNoAPI = regexp.MustCompile(`(?i)\bGo plan doesn.t include API access`)
+var cmdGoNoAPI = lazyre.New(`(?i)\bGo plan doesn.t include API access`)
 
 // CommandCodeGoHint says where a Go plan's key works.
 const CommandCodeGoHint = "a Go plan's key works in magpie through the Command Code plugin (Plugins › Command Code, then sign in with the key), which asks Command Code as its CLI does; a Command Code API-key provider can't use it"
 
 // verifyWords is a refusal asking for the account to be verified, put in
 // words rather than as VALIDATION_REQUIRED — or already by VerifyMessage.
-var verifyWords = regexp.MustCompile(`(?i)verify your account|account verification required|` + verifyAdvice)
+var verifyWords = lazyre.New(`(?i)verify your account|account verification required|` + verifyAdvice)
 
 // verifyLink is the link in a message VerifyMessage put in words.
-var verifyLink = regexp.MustCompile(verifyAdvice + `: open (https://[^\s"\\]+) in a browser`)
+var verifyLink = lazyre.New(verifyAdvice + `: open (https://[^\s"\\]+) in a browser`)
 
 // Verification says whether an error body is Google's refusal of an account
 // it wants verified first — Cloud Code Assist's 403 whose details say
@@ -1253,9 +1341,12 @@ func apiError(b []byte, fallback string) string {
 		}
 		var e struct {
 			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    any    `json:"code"`
+			Param   string `json:"param"`
 		}
 		if json.Unmarshal(v.Error, &e) == nil && e.Message != "" {
-			return e.Message
+			return withErrorFields(e.Message, e.Type, e.Code, e.Param)
 		}
 		var s string
 		if json.Unmarshal(v.Error, &s) == nil && s != "" {
@@ -1284,7 +1375,7 @@ func apiError(b []byte, fallback string) string {
 	// a body in no shape known is shown as it is, cut short, so what the
 	// vendor said isn't lost; other markup (an XML error, a page's
 	// fragment) by its words, its tags taken out
-	s := strings.Join(strings.Fields(string(b)), " ")
+	s := strings.Join(strings.Fields(QuotedReply(b)), " ")
 	if strings.HasPrefix(s, "<") {
 		if s = MarkupText(b); s == "" {
 			return fallback
@@ -1303,10 +1394,10 @@ const NoDetails = "refused with no details (an empty reply, often from a firewal
 
 // pageStart is how a web page begins, or a fragment of one that a proxy
 // serves as its error.
-var pageStart = regexp.MustCompile(`(?i)^<(!doctype\s+html|html[\s>]|head[\s>]|body[\s>]|title[\s>]|meta[\s>])`)
+var pageStart = lazyre.New(`(?i)^<(!doctype\s+html|html[\s>]|head[\s>]|body[\s>]|title[\s>]|meta[\s>])`)
 
 // pageTitle is a web page's title.
-var pageTitle = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+var pageTitle = lazyre.New(`(?is)<title[^>]*>(.*?)</title>`)
 
 // PageTitle is a web page's title as plain words, cut to 120 runes: no
 // markup, entities read, whitespace folded. "" when there is none.
@@ -1323,7 +1414,31 @@ func PageTitle(b []byte) string {
 }
 
 // tagRe is a markup tag, taken out of a title that holds one.
-var tagRe = regexp.MustCompile(`<[^>]*>`)
+var tagRe = lazyre.New(`<[^>]*>`)
+
+// withErrorFields is a vendor's message with the error's own type, code
+// and param after it when the message is only an HTTP status's text
+// ("Bad Request"), which says nothing of what the vendor refused; any
+// other message says it already.
+func withErrorFields(msg, typ string, code any, param string) string {
+	if !statusLine(strings.TrimSpace(msg)) {
+		return msg
+	}
+	var f []string
+	c := ""
+	if code != nil {
+		c = fmt.Sprint(code)
+	}
+	for _, x := range []string{typ, c, param} {
+		if x != "" && !slices.Contains(f, x) {
+			f = append(f, x)
+		}
+	}
+	if len(f) == 0 {
+		return msg
+	}
+	return msg + " (" + strings.Join(f, ", ") + ")"
+}
 
 // statusLine says a fallback is an HTTP error's status ("403 Forbidden",
 // or its text alone, "Forbidden"), what an error body was answered with,
@@ -1374,7 +1489,7 @@ func WebPage(b []byte) (string, bool) {
 
 // unshown is markup whose words aren't a reader's: a script, a style
 // sheet, a comment, an XML declaration.
-var unshown = regexp.MustCompile(`(?is)<script[^>]*>.*?</script\s*>|<style[^>]*>.*?</style\s*>|<!--.*?-->|<\?.*?\?>|<!doctype[^>]*>`)
+var unshown = lazyre.New(`(?is)<script[^>]*>.*?</script\s*>|<style[^>]*>.*?</style\s*>|<!--.*?-->|<\?.*?\?>|<!doctype[^>]*>`)
 
 // MarkupText is the words markup holds, as plain words: scripts, styles
 // and comments out, then every tag, entities read, whitespace folded, cut

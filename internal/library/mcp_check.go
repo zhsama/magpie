@@ -24,6 +24,7 @@ import (
 	"github.com/yetone/magpie/internal/mcpauth"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/wslrun"
 )
 
@@ -104,7 +105,21 @@ var checkClient = &http.Client{Transport: checkTransport()}
 func checkTransport() http.RoundTripper {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.Proxy = netproxy.Func
-	return netproxy.Dispatch(t)
+	return viaRemoteMagpie{netproxy.Dispatch(t)}
+}
+
+// viaRemoteMagpie sends a request to a Remote magpie's MCP router through
+// that provider's own transport (provider.Via): its proxy, its client
+// certificate and the server certificate it trusts, as its model calls go.
+// Only the router's path is looked up, so no other server's request reads
+// providers.json.
+type viaRemoteMagpie struct{ next http.RoundTripper }
+
+func (t viaRemoteMagpie) RoundTrip(r *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(strings.TrimRight(r.URL.Path, "/"), gateway.HubMCPAll) {
+		r = r.WithContext(provider.ViaRemoteMagpieAt(r.Context(), r.URL))
+	}
+	return t.next.RoundTrip(r)
 }
 
 // checked is the last check of each server, by name, with what the
@@ -551,11 +566,11 @@ func startServer(ctx context.Context, s *Server, distro, dir string) (tree *proc
 	fail := func(h ServerHealth) (*proc.Tree, io.WriteCloser, io.ReadCloser, *tail, func(), *ServerHealth) {
 		return nil, nil, nil, nil, nil, &h
 	}
-	env, unset := expandAll(s.Env)
+	command, args, own := launchCmd(s, distro)
+	env, unset := expandAll(own)
 	if len(unset) > 0 {
 		return fail(failed("novar", strings.Join(unset, ", ")))
 	}
-	command, args := launchCmd(s, distro)
 	var cmd *exec.Cmd
 	var t wslrun.Tool
 	stop = func() {}
@@ -805,6 +820,7 @@ func exitHealth(err error, errs *tail) ServerHealth {
 // remoteHeaders are the server's own headers, with magpie's token when it
 // is signed in to it: the agents reach it with that too.
 func remoteHeaders(ctx context.Context, s *Server) (http.Header, *ServerHealth) {
+	s = s.live()
 	h := http.Header{}
 	headers, unset := expandAll(s.Headers)
 	if len(unset) > 0 {

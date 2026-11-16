@@ -57,7 +57,7 @@ func readsWhole(f file, old *state) bool {
 		return true
 	}
 	if f.agent == "codex" && old.Codex == nil {
-		return true
+		return !codexWindowKept(f, old)
 	}
 	return p.claude && old.Claude == nil
 }
@@ -215,7 +215,7 @@ func glance(f file) *state {
 		workbuddyMeta(s, f.path)
 	}
 	g := &state{Size: f.size, Mod: f.mod.UnixNano(), ID: s.ID, Cwd: s.Cwd, Title: s.Title,
-		Start: s.Start, Last: f.mod, CodexIdentity: s.CodexIdentity, Provider: s.Provider,
+		Start: s.Start, Last: f.mod.Time(), CodexIdentity: s.CodexIdentity, Provider: s.Provider,
 		StateMore: moreOf(StateMore{Named: s.more().Named, Custom: s.more().Custom, First: s.more().First,
 			CodexNickname: s.more().CodexNickname})}
 	if g.Start.IsZero() || g.Start.After(g.Last) {

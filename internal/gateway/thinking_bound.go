@@ -1,16 +1,15 @@
 package gateway
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -39,10 +38,10 @@ import (
 // boundRefusal is Claude's refusal of a thinking block it didn't sign for
 // this conversation or account: the signature's wording, the newer
 // binding's, and a redacted_thinking block's.
-var boundRefusal = regexp.MustCompile("(?i)invalid `?signature`? in `?thinking`? block|bound to a different conversation|not created in this conversation|invalid data in `?redacted_thinking`? block")
+var boundRefusal = lazyre.New("(?i)invalid `?signature`? in `?thinking`? block|bound to a different conversation|not created in this conversation|invalid data in `?redacted_thinking`? block")
 
 // boundAt is where the refusal says the block is: messages.<m>.content.<b>.
-var boundAt = regexp.MustCompile(`messages\.(\d+)\.content\.(\d+)`)
+var boundAt = lazyre.New(`messages\.(\d+)\.content\.(\d+)`)
 
 // thinkingRefusedMost bounds the signatures remembered; past it the
 // memory starts again, and a conversation still going is mended by one
@@ -99,7 +98,7 @@ func (s *Server) refuseThinking(owner string, keys []string) {
 // refused before; an assistant message left with nothing goes too. A body
 // with none of them goes byte for byte.
 func (s *Server) withoutRefusedThinking(p provider.Provider, body []byte) []byte {
-	if !bytes.Contains(body, []byte(`thinking"`)) {
+	if !bodyHas(body, `thinking"`) {
 		return body
 	}
 	owner := thinkingOwner(p)
@@ -251,11 +250,11 @@ func (s *Server) withoutForeignThinking(p provider.Provider, body []byte) []byte
 }
 
 func withoutForeignThinking(p provider.Provider, body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"signature"`)) && !thinkingTyped.Match(body) {
+	if !bodyHas(body, `"signature"`) && !thinkingTyped.Match(body) {
 		return body
 	}
 	model := modelOf(body)
-	if anthropicReplaysThinking(p.Host(), model) || p.Host() != "api.anthropic.com" && !anthropicModel.MatchString(model) {
+	if anthropicReplaysThinking(p.VendorHost(), model) || p.VendorHost() != "api.anthropic.com" && !anthropicModel.MatchString(model) {
 		return body
 	}
 	return withoutThinkingBlocks(body, func(_, _ int, b gjson.Result) bool {
@@ -269,8 +268,8 @@ func withoutForeignThinking(p provider.Provider, body []byte) []byte {
 
 // thinkingTyped is a body with a thinking block in it, for one that says
 // no signature at all.
-var thinkingTyped = regexp.MustCompile(`"type"\s*:\s*"thinking"`)
+var thinkingTyped = lazyre.New(`"type"\s*:\s*"thinking"`)
 
 // deepseekSignature is the signature DeepSeek's Anthropic endpoint gives
 // its thinking: the reply's id, a UUID.
-var deepseekSignature = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var deepseekSignature = lazyre.New(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)

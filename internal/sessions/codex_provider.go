@@ -382,19 +382,30 @@ func moveCodexPaths(id, to string, paths []string, now time.Time) (CodexMove, er
 		return CodexMove{}, err
 	}
 	mv.Backup = dir
-	for _, p := range paths {
-		changed, err := rewriteCodexProvider(p, to)
-		if err != nil {
-			// the files changed so far go back as they were
-			for _, it := range items {
-				if contains(mv.Files, it.From) {
-					keptCopy(filepath.Join(dir, "files", it.Name), it.From)
-				}
+	// the files changed so far go back as they were
+	putBack := func() {
+		for _, it := range items {
+			if contains(mv.Files, it.From) {
+				keptCopy(filepath.Join(dir, "files", it.Name), it.From)
 			}
+		}
+		for _, p := range paths {
+			delete(cache, p)
+		}
+		saveCache()
+	}
+	byRow := ""
+	for _, p := range paths {
+		changed, kept, err := rewriteCodexProvider(p, to)
+		if err != nil {
+			putBack()
 			return CodexMove{}, err
 		}
 		if changed {
 			mv.Files = append(mv.Files, p)
+		}
+		if kept && byRow == "" {
+			byRow = p
 		}
 	}
 	for _, p := range paths {
@@ -410,7 +421,28 @@ func moveCodexPaths(id, to string, paths []string, now time.Time) (CodexMove, er
 			}
 		}
 	}
+	// a paginated rollout whose session_meta the id doesn't fit moves by
+	// its row alone, which is where Codex reads its provider from; with no
+	// row to move, it can't be moved at all
+	if byRow != "" && len(mv.DB) == 0 {
+		putBack()
+		os.RemoveAll(dir)
+		return CodexMove{}, &StuckError{File: filepath.Base(byRow), From: mv.From, To: to}
+	}
 	return mv, nil
+}
+
+// StuckError is a Codex session that can't be moved to another provider:
+// its rollout keeps its history by byte (paginated), the new id is longer
+// than the one its session_meta names, so it can't be written in place,
+// and Codex's state database has no row for it to move it by instead.
+// Its files are left as they were.
+type StuckError struct {
+	File, From, To string
+}
+
+func (e *StuckError) Error() string {
+	return fmt.Sprintf("%s can't move to %s: Codex keeps its history by byte, so %q can't be written in place of %q, and Codex's database has no row for it to move it by instead. It stays on %s, as it was: Codex lists it when it uses %s again, and Delete moves it to magpie's trash, where it can be restored", e.File, e.To, e.To, e.From, e.From, e.From)
 }
 
 // errThreadOpen is a thread a Codex has open: it holds the thread's writer
@@ -858,20 +890,24 @@ func setMetaProvider(line []byte, to string) ([]byte, bool) {
 
 // rewriteCodexProvider sets the provider of every session_meta in a rollout,
 // compressed or not, and says whether anything changed. The file is written
-// beside it and renamed over it, with the time it had.
-func rewriteCodexProvider(path, to string) (bool, error) {
+// beside it and renamed over it, with the time it had. A session_meta of a
+// paginated rollout that to is longer than the id it names is left as it
+// is, and said (kept): Codex keeps places in such a rollout by byte, and
+// reads its thread's provider from its row in the state database, never
+// from the file (RetagPagedCodexThreads), so the row is its move.
+func rewriteCodexProvider(path, to string) (changed, kept bool, err error) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	in, err := openLines(path)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer in.Close()
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".magpie-"+filepath.Base(path)+"-*")
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	done := false
 	defer func() {
@@ -884,13 +920,12 @@ func rewriteCodexProvider(path, to string) (bool, error) {
 	var z *zstd.Encoder
 	if packed(path) {
 		if z, err = zstd.NewWriter(tmp); err != nil {
-			return false, err
+			return false, false, err
 		}
 		w = z
 	}
 	bw := bufio.NewWriterSize(w, 64<<10)
 	br := bufio.NewReaderSize(in, 64<<10)
-	changed := false
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
@@ -899,50 +934,50 @@ func rewriteCodexProvider(path, to string) (bool, error) {
 				// a session_meta names its own history_mode: Codex keeps
 				// places in a paginated rollout by byte (fitLine)
 				if out, ok = fitLine(line, out, paginated(line)); !ok {
-					return false, fmt.Errorf("%s keeps its history by byte, and %q is longer than the provider it names: Codex couldn't open it moved", filepath.Base(path), to)
+					kept = true
 				}
 			}
 			changed = changed || ok
 			if _, werr := bw.Write(out); werr != nil {
-				return false, werr
+				return false, false, werr
 			}
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
 	if !changed {
-		return false, nil
+		return false, kept, nil
 	}
 	if err := bw.Flush(); err != nil {
-		return false, err
+		return false, false, err
 	}
 	if z != nil {
 		if err := z.Close(); err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
 	if err := tmp.Chmod(fi.Mode().Perm()); err != nil {
-		return false, err
+		return false, false, err
 	}
 	// the user's session on the disk before it is renamed over the old
 	// one: a machine that goes down between can leave it all zero (#1505)
 	if err := steady.Sync(tmp); err != nil {
-		return false, err
+		return false, false, err
 	}
 	if err := tmp.Close(); err != nil {
-		return false, err
+		return false, false, err
 	}
 	in.Close()
 	os.Chtimes(tmp.Name(), fi.ModTime(), fi.ModTime())
 	if err := os.Rename(tmp.Name(), path); err != nil {
-		return false, err
+		return false, false, err
 	}
 	done = true
-	return true, nil
+	return true, kept, nil
 }
 
 // moveCodexThread sets a thread's model_provider in a Codex state
@@ -1276,4 +1311,120 @@ func retagRows(db *sql.DB, ids []string, from, to string) ([]string, error) {
 		return nil, err
 	}
 	return done, nil
+}
+
+// RetagLoadedCodexThreads moves the threads a Codex has open (their writer
+// lock held, as the Codex app holds the lock of every thread it has
+// loaded, the chat on screen among them) from the provider from to the
+// provider to, which every other move leaves for later because Codex
+// would write its provider back. It is called as the Codex app's
+// app-server is about to be ended for a change of provider: Codex puts
+// nothing back at a clean exit (tried with codex-cli 0.167.1, SIGTERM),
+// and the app-server that starts in its place resumes the chat on its
+// row's provider, where it would otherwise be refused ("This chat uses
+// openai, but your current provider is magpie", modelProviderMismatch).
+// A paginated thread moves by its row alone; a legacy one that Codex
+// keeps as plain lines goes in place, its first line written over at one
+// length (openai and magpie) with the row following. A packed rollout or
+// one of another length is left to the next sync. Recency is not looked
+// at: the end waits for no turn to be open. It says the ids it moved and
+// the first error it met, having gone on past it.
+func RetagLoadedCodexThreads(home, from, to string) ([]string, error) {
+	if !codexProviderRe.MatchString(from) || !codexProviderRe.MatchString(to) || from == to {
+		return nil, fmt.Errorf("can't move Codex's threads from %q to %q", from, to)
+	}
+	locked := codexLockedIDs(home)
+	if len(locked) == 0 {
+		return nil, nil
+	}
+	var moved []string
+	var first error
+	fail := func(err error) {
+		if first == nil {
+			first = err
+		}
+	}
+	for _, p := range codexStateDBs(home) {
+		u := url.URL{Scheme: "file", Path: filepath.ToSlash(p), RawQuery: "_pragma=busy_timeout(5000)"}
+		if len(u.Path) >= 2 && u.Path[1] == ':' {
+			u.Path = "/" + u.Path
+		}
+		db, err := sql.Open("sqlite", u.String())
+		if err != nil {
+			fail(err)
+			continue
+		}
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('threads') WHERE name IN ('id','model_provider','rollout_path')`).Scan(&n); err != nil || n != 3 {
+			db.Close()
+			continue
+		}
+		var hm int
+		db.QueryRow(`SELECT count(*) FROM pragma_table_info('threads') WHERE name = 'history_mode'`).Scan(&hm)
+		q := `SELECT id, rollout_path, '' FROM threads WHERE model_provider = ?`
+		if hm == 1 {
+			q = `SELECT id, rollout_path, COALESCE(history_mode, '') FROM threads WHERE model_provider = ?`
+		}
+		type row struct{ id, path, mode string }
+		var rows []row
+		rs, err := db.Query(q, from)
+		if err != nil {
+			db.Close()
+			fail(err)
+			continue
+		}
+		for rs.Next() {
+			var r row
+			if rs.Scan(&r.id, &r.path, &r.mode) == nil && safeID.MatchString(r.id) && locked[strings.ToLower(r.id)] {
+				rows = append(rows, r)
+			}
+		}
+		rs.Close()
+		var ids []string
+		for _, r := range rows {
+			if r.mode == "paginated" {
+				ids = append(ids, r.id)
+				continue
+			}
+			path := filepath.Clean(r.path)
+			if len(from) != len(to) || !filepath.IsAbs(path) || packed(path) || !strings.Contains(filepath.Base(path), r.id) || !sameDir(codexHomeOf(path), home) {
+				continue
+			}
+			fi, err := os.Lstat(path)
+			if err != nil || !fi.Mode().IsRegular() {
+				continue
+			}
+			ok, err := relabelHead(path, from, to, fi.ModTime())
+			if err != nil {
+				fail(fmt.Errorf("thread %s: %w", r.id, err))
+				continue
+			}
+			if ok {
+				ids = append(ids, r.id)
+			}
+		}
+		if len(ids) > 0 {
+			tx, err := db.Begin()
+			if err != nil {
+				fail(err)
+			} else {
+				for _, id := range ids {
+					res, err := tx.Exec(`UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider = ?`, to, id, from)
+					if err != nil {
+						fail(err)
+						break
+					}
+					if c, _ := res.RowsAffected(); c > 0 {
+						moved = append(moved, id)
+					}
+				}
+				if err := tx.Commit(); err != nil {
+					fail(err)
+				}
+			}
+		}
+		db.Close()
+	}
+	forgetPaged()
+	return moved, first
 }

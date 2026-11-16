@@ -25,13 +25,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -155,7 +155,7 @@ const (
 func (g Group) Waits() time.Duration {
 	n := g.Patience
 	if n == 0 {
-		n = settings.Load().GroupPatience
+		n = settings.Shared().GroupPatience
 	}
 	switch {
 	case n < 0:
@@ -178,7 +178,7 @@ func (g Group) FirstTokenOr() int {
 	if g.FirstToken != 0 {
 		return g.FirstToken
 	}
-	return settings.Load().GroupFirstToken
+	return settings.Shared().GroupFirstToken
 }
 
 // Sinks is whether one of the group's accounts or keys rate limited with
@@ -186,7 +186,7 @@ func (g Group) FirstTokenOr() int {
 // NoSink, else the default for every group (settings' GroupSink). Whether
 // its routing can sink at all is the gateway's to say.
 func (g Group) Sinks() bool {
-	return g.Sink || !g.NoSink && settings.Load().GroupSink
+	return g.Sink || !g.NoSink && settings.Shared().GroupSink
 }
 
 // ContextSmallest is a group's Context when agents are told the window of
@@ -195,9 +195,18 @@ const ContextSmallest = -1
 
 // Group is a routing group.
 type Group struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Note is the user's own word on the group (ConatusMoon2222 on X:
+	// which key it is for, why it is ordered so): one line, shown under
+	// its name on the Routing page and by magpie group, never sent to an
+	// agent or a vendor. Empty shows nothing (CleanNote).
+	Note    string   `json:"note,omitempty"`
 	Members []string `json:"members"` // "provider/model[:effort]" or "group/<id>", in order (see MemberEffort)
+	// Former are the ids it had before a rename (RenameGroup), newest
+	// last: a request still asking group/<old> is routed to it, until a
+	// group takes that id for its own (xinvxueyuan on Discord).
+	Former []string `json:"former,omitempty"`
 	// Match are patterns its models are found by as well (#766): a glob
 	// over the "provider/model" id with * in it ("openrouter/*:free"), or
 	// a regular expression after "re:". Kept apart from Members, so the
@@ -217,6 +226,13 @@ type Group struct {
 	Placed   []string `json:"placed,omitempty"`
 	Routing  string   `json:"routing,omitempty"`  // as Provider.Routing, over all the members' keys and accounts; or Manual
 	Affinity string   `json:"affinity,omitempty"` // as Provider.Affinity
+	// RoutedAt is when the user last changed Routing (SaveGroup): a
+	// conversation the group last answered before it is routed the new
+	// way at its next turn under Stays: Auto, whatever its old member
+	// cached, as a reorder of a provider's accounts is (NoteReordered;
+	// #6708: picked by hand to A, then Use before expiry, the
+	// conversation stayed on A by a 2.8k-token cache)
+	RoutedAt time.Time `json:"routedAt,omitzero"`
 	// Sink is Provider.Sink over the group's members' accounts and keys
 	// together: one rate limited with quota left goes behind every other
 	// member's. Not for "rotate" or Manual.
@@ -275,6 +291,12 @@ type Group struct {
 	// as the members change (Mikan on Discord), so the agent compacts
 	// before any member would turn the conversation away.
 	Context int `json:"context,omitempty"`
+	// Compact is where Codex and Claude Code compact a conversation on the
+	// group, in tokens (NovaStudiosss on X): over what its members' own
+	// thresholds (settings.ModelCompacts) and Long conversations say, so a
+	// group carries both its window (Context) and its compaction and no
+	// provider needs either set for it. 0 leaves it to those.
+	Compact int `json:"compact,omitempty"`
 	// Levels are the reasoning levels agents are offered for the group,
 	// lowest first, when the user names them (#295): rather than those
 	// every member has, so that a member with few doesn't take the rest
@@ -287,6 +309,10 @@ type Group struct {
 	// beside Members, not in their ids, so a version before it still
 	// routes to them, only not fast.
 	Fast []string `json:"fast,omitempty"`
+	// Ultra are the members of Fast sent in the vendor's faster mode
+	// still (Codex's Ultra Fast, kdajenks on X), where the account
+	// offers it and priority where not. Always a part of Fast.
+	Ultra []string `json:"ultra,omitempty"`
 	// Weights are the members' shares (as Members spells them) when the
 	// group routes by weight (Weighted, #1910): one weighing 3 takes three
 	// requests for every one a member weighing 1 takes. One not in it
@@ -316,6 +342,26 @@ type Group struct {
 	// of a provider it names, a provider it names none of on every
 	// account it has. Empty, every account of every member serves.
 	Accounts []string `json:"accounts,omitempty"`
+	// Keys bind the group to some gateway keys (access.Key.ID; Xerxes754
+	// on X: a group for one or two keys alone). Set, a request with
+	// another key may neither use the group nor see it in a model list,
+	// whatever models that key may use; a key issued under one of them
+	// may, as it may what its issuer may. A request with no key (this
+	// computer's own) is held by no key and passes. Empty, every key the
+	// group is given passes, as before. Saved, nil keeps the group's
+	// (SaveGroup), so a caller that doesn't know of them leaves them be;
+	// empty clears them.
+	Keys []string `json:"keys,omitempty"`
+	// Redact is whether a request through the group is masked (1dwsdqwd2
+	// on X: some groups masked, some not): "" follows each member's
+	// provider ("Send requests unmasked") and Settings, RedactOn masks it
+	// as Settings say whichever provider, RedactOff sends it as written.
+	// It is the user's alone: Settings with masking off mask nothing, a
+	// shared group carries none, and in a group inside a group any RedactOn
+	// among them wins over RedactOff. Saved, "" keeps the group's
+	// (SaveGroup) and RedactFollow clears it, so a caller that doesn't
+	// know of it leaves it be.
+	Redact string `json:"redact,omitempty"`
 	// Auto is set on a group magpie found: one model served by several
 	// providers. It is derived, never stored.
 	Auto bool `json:"auto,omitempty"`
@@ -350,7 +396,11 @@ type Member struct {
 	Path []string
 	// Via are the groups in the group it is of, the outermost first: the
 	// group each of Path's members but the last names.
-	Via      []Group
+	Via []Group
+	// Redact is what the groups it is reached through say of masking, the
+	// group itself and each in Via (Group.Redact): RedactOn if any says so,
+	// else RedactOff if any does, else "".
+	Redact   string
 	Provider Provider
 	Model    string // what the vendor is asked for
 	// Effort is the reasoning the member is fixed at ("provider/model:low"),
@@ -369,6 +419,13 @@ type Member struct {
 	// Fast is set on a member the group sends in its vendor's fast mode
 	// (Group.Fast), where its model has one.
 	Fast bool
+	// Ultra is set on a Fast member the group sends in the faster mode.
+	Ultra bool
+	// Account is the one account or key of Provider the member is sent
+	// on, "<provider>/<stable id>", as Group.Accounts has them
+	// ("provider/model#<id>", groupaccount.go); "" for every one the
+	// groups it is in allow.
+	Account string
 	// At is where the walk down the group met it, counting every model of
 	// every group in it, the same model's later places too: a group's own
 	// models are met in its own order.
@@ -435,7 +492,7 @@ func (m Member) Groups() []string {
 // Below is the member as the group at depth (0 the group itself, 1 the
 // group in it Path[0] names, …) has it.
 func (m Member) Below(depth int) Member {
-	out := Member{ID: m.Path[depth], Path: m.Path[depth:], Via: m.Via[depth:], Provider: m.Provider, Model: m.Model, Effort: m.Effort, Levels: m.Levels, EffortMap: m.EffortMap, Fast: m.Fast, At: m.At}
+	out := Member{ID: m.Path[depth], Path: m.Path[depth:], Via: m.Via[depth:], Redact: m.Redact, Provider: m.Provider, Model: m.Model, Effort: m.Effort, Levels: m.Levels, EffortMap: m.EffortMap, Fast: m.Fast, Ultra: m.Ultra, Account: m.Account, At: m.At}
 	// its other places in the same group at depth
 	for _, o := range m.Also {
 		if len(o.Path) > depth && slices.Equal(o.Path[:depth], m.Path[:depth]) {
@@ -485,6 +542,13 @@ func sharedGroupsIn(entries []Entry) []Group {
 // cloneGroup is g with nothing shared with it (cloneGroups).
 func cloneGroup(g Group) Group { return cloneGroups([]Group{g})[0] }
 
+// GroupsBound says some routing group is bound to gateway keys
+// (Group.Keys), read from the groups held for the catalog, no copy made:
+// a model list for a key no group binds needs no other look.
+func GroupsBound() bool {
+	return slices.ContainsFunc(sharedGroups(), func(g Group) bool { return len(g.Keys) > 0 })
+}
+
 // cloneGroups is gs with nothing shared with it: no slice, map or pointer
 // of a group or its rules.
 func cloneGroups(gs []Group) []Group {
@@ -494,8 +558,9 @@ func cloneGroups(gs []Group) []Group {
 	out := make([]Group, len(gs))
 	for i, g := range gs {
 		g.Members, g.Match, g.Matched, g.Placed = slices.Clone(g.Members), slices.Clone(g.Match), slices.Clone(g.Matched), slices.Clone(g.Placed)
-		g.Off, g.Levels, g.Fast = slices.Clone(g.Off), slices.Clone(g.Levels), slices.Clone(g.Fast)
-		g.Accounts, g.Seen = slices.Clone(g.Accounts), slices.Clone(g.Seen)
+		g.Off, g.Levels, g.Fast, g.Ultra = slices.Clone(g.Off), slices.Clone(g.Levels), slices.Clone(g.Fast), slices.Clone(g.Ultra)
+		g.Accounts, g.Seen, g.Keys = slices.Clone(g.Accounts), slices.Clone(g.Seen), slices.Clone(g.Keys)
+		g.Former = slices.Clone(g.Former)
 		g.Weights = maps.Clone(g.Weights)
 		g.EffortMaps = renamedEffortMaps(g.EffortMaps, func(m string) string { return m })
 		if g.IntentSure != nil {
@@ -506,6 +571,7 @@ func cloneGroups(gs []Group) []Group {
 			rs := make([]Rule, len(g.Rules))
 			for j, r := range g.Rules {
 				r.Agents, r.Folders, r.ExceptFolders, r.More = slices.Clone(r.Agents), slices.Clone(r.Folders), slices.Clone(r.ExceptFolders), slices.Clone(r.More)
+				r.Where = slices.Clone(r.Where)
 				if r.Time != nil {
 					t := *r.Time
 					t.Days = slices.Clone(t.Days)
@@ -600,6 +666,7 @@ func withoutRemoved(g Group, have map[string]bool) Group {
 	g.Members = kept
 	g.Off = slices.DeleteFunc(slices.Clone(g.Off), gone)
 	g.Fast = slices.DeleteFunc(slices.Clone(g.Fast), gone)
+	g.Ultra = slices.DeleteFunc(slices.Clone(g.Ultra), gone)
 	g.Weights = renamedWeights(g.Weights, func(m string) string {
 		if gone(m) {
 			return ""
@@ -688,8 +755,11 @@ func (g Group) own() Group {
 	g.Off = slices.Clone(g.Off)
 	g.Levels = slices.Clone(g.Levels)
 	g.Fast = slices.Clone(g.Fast)
+	g.Ultra = slices.Clone(g.Ultra)
 	g.Accounts = slices.Clone(g.Accounts)
+	g.Keys = slices.Clone(g.Keys)
 	g.Seen = slices.Clone(g.Seen)
+	g.Former = slices.Clone(g.Former)
 	g.Weights = maps.Clone(g.Weights)
 	g.EffortMaps = renamedEffortMaps(g.EffortMaps, func(m string) string { return m })
 	g.Rules = slices.Clone(g.Rules)
@@ -698,6 +768,7 @@ func (g Group) own() Group {
 		g.Rules[i].Folders = slices.Clone(r.Folders)
 		g.Rules[i].ExceptFolders = slices.Clone(r.ExceptFolders)
 		g.Rules[i].More = slices.Clone(r.More)
+		g.Rules[i].Where = slices.Clone(r.Where)
 		if r.Time != nil {
 			w := *r.Time
 			w.Days = slices.Clone(w.Days)
@@ -760,7 +831,7 @@ func SetAutoGroups(on bool) error {
 // vendor spells it: "auto-claude-opus-5-5" for claude-opus-5.5.
 func AutoGroupID(model string) string { return "auto-" + Slug(sameModel(model)) }
 
-var groupDots = regexp.MustCompile(`\.{2,}`)
+var groupDots = lazyre.New(`\.{2,}`)
 
 // GroupSlug derives a group's own id from a name as Slug does, the dots
 // kept: "GPT 6.1 Sol" → "gpt-6.1-sol", so an agent sending group/<id> sends
@@ -792,7 +863,22 @@ func mergeKey(pid, model string, same map[string]string) string {
 	if v := same[pid+"/"+model]; v != "" {
 		return sameModel(v)
 	}
+	if v := editionTwins[pid+"/"+model]; v != "" {
+		return sameModel(v)
+	}
 	return sameModel(model)
+}
+
+// editionTwins are the models a vendor's international edition lists
+// under another id than its China edition does, which are the same model:
+// the found groups merge each with its twin, as they merge Qoder's and
+// Trae's two editions by their one id (Kts6M2fwWN43967 on X: WorkBuddy and
+// WorkBuddy AI stayed two rows). The user's own "same as" (ModelSameAs)
+// is read first. WorkBuddy AI lists deepseek-v4.1-flash under its paid
+// id, -sg, which the product config names as the free id's paid id
+// (allowPaidSwitch), so a signed-in account may list that one alone.
+var editionTwins = map[string]string{
+	"workbuddy-ai/deepseek-v4.1-flash-sg": "deepseek-v4.1-flash",
 }
 
 // AutoStandIn is the model a request for a group magpie found goes to while
@@ -833,7 +919,7 @@ func AutoStandInFor(agent, id string) (string, bool) {
 		if AutoGroupOf(e.Provider.ID, e.Model) != gid {
 			continue
 		}
-		if ownAgent(e.Provider, agent) {
+		if ownAgent(*e.Provider, agent) {
 			return e.ID, true
 		}
 		if kept == "" && !slices.Contains(f.AutoGroupSkip, e.Provider.ID) {
@@ -985,6 +1071,26 @@ func FindGroup(id string) (Group, []Member, bool) {
 	return GroupFinder()(id)
 }
 
+// GroupHasNative says whether the group id has a member found now that
+// speaks api natively, kept across requests while the files stay the same
+// (keptOf, a minute at most). Pi's Drift asks it of the model an agent is
+// set to on every /api/drift poll, and finding the members was ~3.4 MB a
+// poll with real accounts, four of five bytes the window allocated a minute.
+func GroupHasNative(id string, api Protocol) bool {
+	return keptOf("group native "+string(api)+" "+id, func() bool {
+		_, ms, ok := GroupFinder()(id)
+		if !ok {
+			return false
+		}
+		for _, m := range ms {
+			if m.Provider.Native(m.Model) == api {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 // FallbackGroup is the routing group a provider's fallback entry names
 // ("group/<id>", 01huadalang on Discord), as the gateway routes it (Live),
 // with its members ready now. ok is false for an entry naming a model,
@@ -1032,7 +1138,9 @@ func FallbackModels(p Provider) []Member {
 // can't take (every one held at its usage cap, or Codex's own sign-in out
 // of its allowance) goes on to these when nothing set as its fallback
 // takes it (adorable_piglet on Discord, v0.1.3354): the Codex app asks
-// Codex's own model, never the group built around it.
+// Codex's own model, never the group built around it. A request that
+// named the provider itself ("claude/…") is not sent on to these
+// (gateway's namedProvider, Anotiaww on X).
 func GroupsAfter(id string) []string {
 	var out []string
 	for _, gid := range MemberGroups()[id] {
@@ -1125,13 +1233,22 @@ func GroupFinder() func(id string) (Group, []Member, bool) {
 			entries, read = providerEntries(), true
 			all, find = sharedGroupsIn(entries), heldFrom("entries by", entries, entriesBy)
 		}
-		if g, ok := groupOf(all, gid); ok && !g.Disabled {
+		if g, ok := routedGroupOf(all, gid); ok && !g.Disabled {
+			groupsFound.Add(1)
 			g = cloneGroup(g)
 			return g, membersFound(entries, find, all, g, disabledNow(), nil), true
 		}
 		return Group{}, nil, false
 	}
 }
+
+// groupsFound counts the groups GroupFinder found members for, for a test
+// that counts them.
+var groupsFound atomic.Int64
+
+// GroupsFound is how many times a group's members were found, for another
+// package's test that counts them.
+func GroupsFound() int64 { return groupsFound.Load() }
 
 // FindDrawingGroup is FindGroup for a drawing (the gateway's images API):
 // a member that is one of its provider's image models, as draws says, is
@@ -1155,7 +1272,7 @@ func FindGroupAlso(id string, also func(p Provider, model string) bool) (Group, 
 	}
 	entries := providerEntries()
 	all := sharedGroupsIn(entries)
-	if g, ok := groupOf(all, gid); ok && !g.Disabled {
+	if g, ok := routedGroupOf(all, gid); ok && !g.Disabled {
 		g = cloneGroup(g)
 		return g, membersFound(entries, heldFrom("entries by", entries, entriesBy), all, g, disabledNow(), also), true
 	}
@@ -1163,6 +1280,19 @@ func FindGroupAlso(id string, also func(p Provider, model string) bool) (Group, 
 }
 
 // groupOf is the group of an id among all, unless it was removed.
+// GroupRoutedAt is when the user last changed group id's routing
+// (Group.RoutedAt); the zero time when never, or no such group. It reads
+// the groups held for the catalog, no copy made: the gateway asks it once
+// a request to a group.
+func GroupRoutedAt(id string) time.Time {
+	for _, g := range sharedGroups() {
+		if g.ID == id && !g.Hidden {
+			return g.RoutedAt
+		}
+	}
+	return time.Time{}
+}
+
 func groupOf(all []Group, id string) (Group, bool) {
 	for _, g := range all {
 		if g.ID == id && !g.Hidden {
@@ -1170,6 +1300,33 @@ func groupOf(all []Group, id string) (Group, bool) {
 		}
 	}
 	return Group{}, false
+}
+
+// routedGroupOf is the group a request for group/<id> goes to: the group
+// of that id, or else the one renamed from it (Former), so an agent or a
+// script still on the old id keeps working after a rename. A group of
+// that id, switched off too, holds the id; one magpie found that is
+// removed (Hidden, as a rename leaves a found group's old id) does not.
+func routedGroupOf(all []Group, id string) (Group, bool) {
+	if g, ok := groupOf(all, id); ok {
+		return g, true
+	}
+	for _, g := range all {
+		if !g.Hidden && slices.Contains(g.Former, id) {
+			return g, true
+		}
+	}
+	return Group{}, false
+}
+
+// dropFormer takes id out of every group's Former: a group took it for
+// its own, and group/<id> is that group's now.
+func dropFormer(gs []Group, id string) {
+	for i := range gs {
+		if slices.Contains(gs[i].Former, id) {
+			gs[i].Former = slices.DeleteFunc(slices.Clone(gs[i].Former), func(x string) bool { return x == id })
+		}
+	}
 }
 
 // membersIn are a group's models, ready now, in its order: a group in it
@@ -1191,13 +1348,20 @@ func membersOff(entries []Entry, all []Group, g Group, off func(pid, model strin
 // most of what the Providers page spent on groups. A model also says is
 // the group's whatever p's picks are (FindDrawingGroup); nil for none.
 func membersFound(entries []Entry, find entryOf, all []Group, g Group, off func(pid, model string) bool, also func(p Provider, model string) bool) []Member {
-	var out []Member
-	seen := map[string]int{} // where in out
+	// made at the group's own count: a Member is large, and growing out
+	// by append was 9 MB of what forty polls of the Providers page
+	// allocated with real accounts. A group in it can add more.
+	n := len(g.Members)
+	if g.Routing == Manual {
+		n = 1
+	}
+	out := make([]Member, 0, n)
+	seen := make(map[string]int, n) // where in out
 	at := 0
-	var walk func(g Group, path []string, via []Group, in []string)
-	walk = func(g Group, path []string, via []Group, in []string) {
+	var walk func(g Group, path []string, via []Group, in []string, redact string)
+	walk = func(g Group, path []string, via []Group, in []string, redact string) {
+		redact = RedactWith(redact, g.Redact)
 		for _, id := range g.routes() {
-			here := append(slices.Clone(path), id)
 			if gid, ok := strings.CutPrefix(id, GroupPrefix); ok {
 				sub, ok := groupOf(all, gid)
 				if !ok || sub.Disabled || slices.Contains(in, gid) || len(via) >= maxNest {
@@ -1206,17 +1370,24 @@ func membersFound(entries []Entry, find entryOf, all []Group, g Group, off func(
 				// its own copy: all may be the groups held (sharedGroupsIn),
 				// and a member's Via and EffortMap are its caller's
 				sub = cloneGroup(sub).Within(g)
-				walk(sub, here, append(slices.Clone(via), sub.Live()), append(slices.Clone(in), gid))
+				walk(sub, append(slices.Clone(path), id), append(slices.Clone(via), sub.Live()), append(slices.Clone(in), gid), redact)
 				continue
 			}
 			model, effort := memberEffortIn(entries, id)
 			p, m, ok := resolveIn(entries, model)
-			key := WithMemberEffort(p.ID+"/"+m, effort)
 			if !ok || unpicked(find, p, m) && (also == nil || !also(p, m)) {
 				continue // none serves it, or the user unchecked it (#3911)
 			}
+			// on one account of its own (EastonXvii on X): the same model
+			// on another account is another member, asked in its own place
+			_, acct := MemberAccount(id)
+			if acct != "" {
+				acct = p.ID + "/" + acct
+			}
+			key := WithMemberAccount(WithMemberEffort(p.ID+"/"+m, effort), acct)
+			here := append(slices.Clone(path), id)
 			fixed, levels := MemberLevels(effort)
-			mem := Member{ID: here[0], Path: here, Via: via, Provider: p, Model: m, Effort: fixed, Levels: levels, Fast: g.IsFast(id), At: at}
+			mem := Member{ID: here[0], Path: here, Via: via, Redact: redact, Provider: p, Model: m, Effort: fixed, Levels: levels, Fast: g.IsFast(id), Ultra: g.IsUltra(id), Account: acct, At: at}
 			if fixed == "" && levels == nil {
 				mem.EffortMap = g.MemberEffortMap(id)
 			}
@@ -1234,7 +1405,10 @@ func membersFound(entries []Entry, find entryOf, all []Group, g Group, off func(
 			out = append(out, mem)
 		}
 	}
-	walk(g, nil, nil, []string{g.ID})
+	walk(g, nil, nil, []string{g.ID}, "")
+	if len(out) == 0 {
+		return nil // none, as before it was made at its size
+	}
 	return out
 }
 
@@ -1272,6 +1446,31 @@ func ResolveRoute(id string) (Provider, string, bool) {
 		return Provider{}, "", false
 	}
 	return p, m, true
+}
+
+// Unpicked reports whether id, "provider/model", names a model the user
+// has since unchecked in that provider's list (unpicked), and which
+// provider: Resolve still takes it, so an agent left on it goes on asking
+// the vendor for the old model, while the user picked the provider's
+// others (JNDliuliuM on X: Codex CLI still on it after a restart).
+func Unpicked(id string) (pid string, ok bool) {
+	entries := providerEntries()
+	p, m, found := resolveIn(entries, ThroughSelf(strings.TrimSuffix(strings.TrimSpace(id), "[1m]")))
+	if !found {
+		return "", false
+	}
+	find := func(pid, model string) int {
+		for i := range entries {
+			if entries[i].Provider.ID == pid && entries[i].Model == model {
+				return i
+			}
+		}
+		return -1
+	}
+	if !unpicked(find, p, m) {
+		return "", false
+	}
+	return p.ID, true
 }
 
 // groupEntries are the catalog's groups: each with a member ready, named
@@ -1351,7 +1550,7 @@ func buildGroupEntries(entries []Entry) []Entry {
 		if len(ms) == 0 || DecisionGroup(ms) {
 			continue // a decision group answers System One, no agent's conversation
 		}
-		e := Entry{ID: g.Ref(), Model: ms[0].Model, Name: g.Name, Provider: ms[0].Provider, Group: g.ID, Named: !g.Auto}
+		e := Entry{ID: g.Ref(), Model: ms[0].Model, Name: g.Name, Provider: &ms[0].Provider, Group: g.ID, Named: !g.Auto}
 		var fixed []string // the efforts members are fixed at
 		levelled := false  // a member that follows the agent's effort was met
 		// Codex's ultra (max, with Codex handing parts of the task to agents
@@ -1369,10 +1568,14 @@ func buildGroupEntries(entries []Entry) []Entry {
 			var efforts []string
 			images, thinks, ctx, output := false, false, 0, 0
 			var imageInput *bool
+			// the kinds of input and output the member's source listed
+			// (video, audio and pdf beside image, #1595)
+			var inputs, outputs []string
 			unknown, reasonless, typed := false, false, false
 			if j := find(m.Provider.ID, m.Model); j >= 0 {
 				x := &entries[j]
 				efforts, images, thinks, ctx, output, imageInput = x.Efforts, x.Images, x.Reasoning, x.Context, x.Output, x.ImageInput
+				inputs, outputs = x.Inputs, x.Outputs
 				typed = x.WindowSet
 				unknown, reasonless = levelsUnknown(*x), x.Reasonless
 			}
@@ -1399,6 +1602,14 @@ func buildGroupEntries(entries []Entry) []Entry {
 			// group of DeepSeek V4.1 Flash with a text-only member in it
 			// turned every image away, though its other members see)
 			e.Images = e.Images || images
+			// and every other kind a member takes or gives, a video among
+			// them: the gateway sends a request with a video only to the
+			// members that take one (videoInput in the gateway), as it does
+			// an image. Left nil, Modalities fell back to text and image,
+			// and a group of MiniMax M3.1 Flash, which takes video, was
+			// listed as not taking it (#2898, #6135)
+			e.Inputs = unionKinds(e.Inputs, inputs)
+			e.Outputs = unionKinds(e.Outputs, outputs)
 			// the window agents are told is the largest a member has:
 			// a conversation too long for one member goes on to a member
 			// with room for it (#700, withRoom in the gateway), so the
@@ -1520,6 +1731,26 @@ func buildGroupEntries(entries []Entry) []Entry {
 	return out
 }
 
+// unionKinds is every kind a or b lists, in the order given; nil when
+// neither lists any, which is not an empty list: Modalities falls back to
+// text and image on nil (an entry whose source said nothing), and reads a
+// list as it is.
+func unionKinds(a, b []string) []string {
+	if a == nil && b == nil {
+		return nil
+	}
+	out := slices.Clone(a)
+	if out == nil {
+		out = []string{}
+	}
+	for _, k := range b {
+		if !slices.Contains(out, k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // smallestWindow is the smallest window a member of ms is known to have
 // (0 when none is), and whether the user typed it, on the member's
 // provider for its model or all of its models. A group told its
@@ -1592,6 +1823,19 @@ func (e Entry) Quiet() bool {
 	return e.Reasonless || !e.Reasoning && len(e.Efforts) == 0 && !levelsUnknown(e)
 }
 
+// NoteLongest is how many characters a group's note keeps.
+const NoteLongest = 200
+
+// CleanNote is a group's note as stored: one line, its spaces and line
+// breaks run together, at most NoteLongest characters.
+func CleanNote(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > NoteLongest {
+		s = strings.TrimSpace(string(r[:NoteLongest]))
+	}
+	return s
+}
+
 // SaveGroup adds or replaces a group of the user's. Changing one magpie
 // found makes it the user's.
 func SaveGroup(g Group) error {
@@ -1608,6 +1852,7 @@ func SaveGroup(g Group) error {
 	if g.Name == "" {
 		g.Name = g.ID
 	}
+	g.Note = CleanNote(g.Note)
 	g.FirstToken = max(g.FirstToken, FirstTokenWait)
 	if g.Sink {
 		g.NoSink = false
@@ -1619,6 +1864,7 @@ func SaveGroup(g Group) error {
 	if g.Context < 0 {
 		g.Context = ContextSmallest
 	}
+	g.Compact = max(g.Compact, 0)
 	// the members it names and its patterns, without what the patterns
 	// matched when it was read: those are found again below, and stored
 	// never
@@ -1641,6 +1887,9 @@ func SaveGroup(g Group) error {
 	named := len(g.Members)
 	g.Members = append(g.Members, matchesIn(entries, g)...)
 	if err := cleanFast(entries, &g); err != nil {
+		return err
+	}
+	if err := checkMemberAccounts(g.Members, wasMembers(f.Groups, g.ID)); err != nil {
 		return err
 	}
 	for i, m := range g.Members {
@@ -1681,9 +1930,26 @@ func SaveGroup(g Group) error {
 	if err := cleanEffortMaps(entries, &g); err != nil {
 		return err
 	}
-	var was []string
+	var was, keysWas, formerWas []string
+	var redactWas string
 	if i := slices.IndexFunc(f.Groups, func(x Group) bool { return x.ID == g.ID }); i >= 0 {
-		was = f.Groups[i].Accounts
+		was, keysWas, formerWas, redactWas = f.Groups[i].Accounts, f.Groups[i].Keys, f.Groups[i].Former, f.Groups[i].Redact
+	}
+	switch g.Redact {
+	case "":
+		g.Redact = redactWas // a caller that doesn't know of it
+	case RedactOn, RedactOff:
+	default:
+		g.Redact = "" // RedactFollow, or a word it doesn't know
+	}
+	if g.Former == nil {
+		g.Former = slices.Clone(formerWas) // a caller that doesn't know of them
+	}
+	g.Former = slices.DeleteFunc(cleanList(g.Former), func(id string) bool { return id == g.ID })
+	if g.Keys == nil {
+		g.Keys = slices.Clone(keysWas) // a caller that doesn't know of them
+	} else if g.Keys, err = cleanGroupKeys(g.Keys); err != nil {
+		return err
 	}
 	if g.Accounts, err = cleanGroupAccounts(g.Accounts, was); err != nil {
 		return err
@@ -1768,9 +2034,13 @@ func SaveGroup(g Group) error {
 		g.Seen = seenIn(g.ID, was, own, entries)
 	}
 	g.Disabled = false
+	dropFormer(f.Groups, g.ID)
 	for i := range f.Groups {
 		if f.Groups[i].ID == g.ID {
 			g.Disabled = f.Groups[i].Disabled && !f.Groups[i].Hidden
+			if g.RoutedAt = f.Groups[i].RoutedAt; g.Routing != f.Groups[i].Routing {
+				g.RoutedAt = time.Now().UTC()
+			}
 			f.Groups[i] = g
 			return store(f)
 		}
@@ -1786,6 +2056,24 @@ func SaveGroup(g Group) error {
 // held already and its provider has no more (an account signed out, a key
 // rotated) is kept as it was, matching nothing, so the group stays held
 // rather than let off to every account; a new one must be one magpie has.
+// cleanGroupKeys is a group's Keys trimmed, each once: nil for none.
+func cleanGroupKeys(in []string) ([]string, error) {
+	var out []string
+	for _, k := range in {
+		if k = strings.TrimSpace(k); k == "" || slices.Contains(out, k) {
+			continue
+		}
+		if len(k) > 200 {
+			return nil, errors.New("a group's gateway key is its id, at most 200 characters")
+		}
+		out = append(out, k)
+	}
+	if len(out) > 500 {
+		return nil, errors.New("a group can be bound to at most 500 gateway keys")
+	}
+	return out, nil
+}
+
 func cleanGroupAccounts(in, was []string) ([]string, error) {
 	var out []string
 	for _, a := range in {
@@ -1983,6 +2271,7 @@ func DeleteGroups(ids []string) error {
 			return fmt.Errorf("no group %q", id)
 		}
 	}
+	removedFound := slices.ContainsFunc(all, func(g Group) bool { return g.Auto && !g.Hidden && in[g.ID] })
 	for _, g := range all {
 		if g.Hidden || in[g.ID] {
 			continue
@@ -2008,6 +2297,13 @@ func DeleteGroups(ids []string) error {
 			return last
 		}
 		left = next
+	}
+	// Removing every group magpie found says the user wants none: a model
+	// a provider serves later, or one it lists after a refresh, must not
+	// bring a new one back (xwang_sh on X). The removed ones stay recorded;
+	// found groups on again (SetAutoGroups) brings them as they were.
+	if removedFound && AutoGroupsOn() && !slices.ContainsFunc(groupsIn(providerEntries()), func(g Group) bool { return g.Auto && !g.Hidden }) {
+		return SetAutoGroups(false)
 	}
 	return nil
 }
@@ -2136,7 +2432,9 @@ func RenameGroup(from, to string) error {
 	}
 	found := slices.ContainsFunc(foundGroups(providerEntries()), func(o Group) bool { return o.ID == from })
 	g.ID, g.Auto, g.Hidden = to, false, false
+	g.Former = append(slices.DeleteFunc(slices.Clone(g.Former), func(id string) bool { return id == from || id == to }), from)
 	f.Groups = slices.DeleteFunc(f.Groups, func(o Group) bool { return o.ID == from })
+	dropFormer(f.Groups, to)
 	if found {
 		f.Groups = append(f.Groups, Group{ID: from, Hidden: true})
 	}
@@ -2234,4 +2532,58 @@ func renameGroupPicks(old, now string) error {
 	}
 	catalog.Touched()
 	return nil
+}
+
+// A Group's Redact: what a request through it is masked by.
+const (
+	RedactOn     = "on"     // masked as Settings say, whatever its provider says
+	RedactOff    = "off"    // sent as written
+	RedactFollow = "follow" // saved: clears it, the providers' own say
+)
+
+// RedactWith is what two say of masking together: on wins over off, and
+// either over nothing.
+func RedactWith(a, b string) string {
+	if a == RedactOn || b == RedactOn {
+		return RedactOn
+	}
+	if a == RedactOff || b == RedactOff {
+		return RedactOff
+	}
+	return ""
+}
+
+// Masking is what the groups the member is reached through say of
+// masking, all its places counted (Also, the same model met again in
+// another group): RedactOn if any says so, RedactOff only if all do, else
+// "". The model's provider is the same in each place.
+func (m Member) Masking() string {
+	out := m.Redact
+	for _, o := range m.Also {
+		switch o := o.Masking(); {
+		case o == RedactOn || out == RedactOn:
+			out = RedactOn
+		case o != out:
+			out = ""
+		}
+	}
+	return out
+}
+
+// Unmasked says a request to the member goes as written: its groups say
+// so (Masking), or none says otherwise and its provider is set to send
+// unmasked (Provider.SkipsRedaction).
+func (m Member) Unmasked() bool { return UnmaskedBy(m.Masking(), m.Provider) }
+
+// UnmaskedBy says a request to p goes as written under what groups say of
+// masking (Group.Redact, Member.Masking): RedactOn never, RedactOff
+// always, else as p is set.
+func UnmaskedBy(redact string, p Provider) bool {
+	switch redact {
+	case RedactOn:
+		return false
+	case RedactOff:
+		return true
+	}
+	return p.SkipsRedaction()
 }

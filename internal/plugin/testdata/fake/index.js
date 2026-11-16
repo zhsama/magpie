@@ -74,7 +74,11 @@ export const FakePlugin = async ({ client }) => ({
     cfg.provider[ID] = {
       name: "FakeCo",
       npm: "@ai-sdk/openai-compatible",
-      api: "https://fake.invalid/v1",
+      // $FAKE_API: the base the provider says its requests go to, as a
+      // plugin in front of a vendor's own API says it (a Mistral Vibe
+      // plugin's https://api.mistral.ai/v1, #5464); the loader's fetch
+      // still sends to $FAKE_BASE
+      api: process.env.FAKE_API || "https://fake.invalid/v1",
       models: {
         "fake-1": { name: "Fake One", limit: { context: 1000, output: 100 } },
         "fake-claude": { name: "Fake Claude", provider: { npm: "@ai-sdk/anthropic" }, modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 2000, output: 200 } },
@@ -89,6 +93,10 @@ export const FakePlugin = async ({ client }) => ({
     // a model's -fast (=tier: see the models hook)
     if (process.env.FAKE_FAST === "1") cfg.provider[ID].models["fake-1-fast"] = { name: "Fake One Fast", limit: { context: 1000, output: 100 } }
     if (process.env.FAKE_RESPONSES) cfg.provider[ID].models["fake-resp"] = { name: "Fake Responses", provider: { npm: "@ai-sdk/openai" }, limit: { context: 4000, output: 400 } }
+    // $FAKE_ALSO: a model on chat completions whose vendor serves it on
+    // Responses and Anthropic's messages too, as Open Design's amr-link
+    // serves every model (plugins#888)
+    if (process.env.FAKE_ALSO) cfg.provider[ID].models["fake-also"] = { name: "Fake Also", also: ["@ai-sdk/anthropic", "@ai-sdk/openai"], limit: { context: 4000, output: 400 } }
     // $FAKE_GROK: a Grok model on Responses, as Grok's plugin serves it
     if (process.env.FAKE_GROK) cfg.provider[ID].models["grok-4.7"] = { name: "Grok 4.7", provider: { npm: "@ai-sdk/openai" }, limit: { context: 4000, output: 400 } }
     // $FAKE_SENSENOVA: SenseNova's image model as its plugin lists it from
@@ -256,7 +264,7 @@ export const FakePlugin = async ({ client }) => ({
         // where magpie said the agent works, as the plugin read it; its own
         // headers go on too, as a plugin that sends on what it got sends
         // them, for the host to take off
-        for (const k of ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback", "x-magpie-session", "x-magpie-subagent"]) if (h.has(k)) h.set("x-saw-" + k.slice(9), h.get(k))
+        for (const k of ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback", "x-magpie-session", "x-magpie-subagent", "x-magpie-effort"]) if (h.has(k)) h.set("x-saw-" + k.slice(9), h.get(k))
         // $FAKE_QUEUE: that model is queued at the vendor, as Qoder's free
         // models are: waited out (here until magpie gives up) unless magpie
         // said it needn't be, then said at once with the queue's 503
@@ -327,6 +335,26 @@ export const FakePlugin = async ({ client }) => ({
         ],
       }
     },
+    // $FAKE_CALLS: the account's calls made outside magpie, as Cursor's
+    // plugin lists them (auth.calls), from since on; the account key
+    // "calls-throw" can't reach the vendor
+    ...(process.env.FAKE_CALLS
+      ? {
+          calls: async (getAuth, provider, { since }) => {
+            const a = await getAuth()
+            if (a.key === "calls-throw") throw new Error("FakeCo's usage events answered 503")
+            return {
+              calls: [
+                { rid: "ev-1", t: since + 1000, model: "fake-1", in: 12, out: 3, cache_read: 40, cache_write: 2, cost: 0.004, session: "conv-1" },
+                // no rid, no time, odd counts: dropped or read as none
+                { t: since + 2000, model: "fake-1", in: 1 },
+                { rid: "ev-no-time", model: "fake-1" },
+                { rid: "ev-2", t: since + 3000, model: "fake-2", in: "9", out: -1, cost: "1" },
+              ],
+            }
+          },
+        }
+      : {}),
     // $FAKE_CHECKIN: the plugin presses the daily check-in itself, each
     // press written as a line of the account's key to that file (a signed-in
     // account's name/uid, so two of one name tell apart), and the
@@ -372,7 +400,7 @@ export const FakePlugin = async ({ client }) => ({
     id: ID,
     models: async (p, { auth }) => {
       // $FAKE_MODELS_LOG: each time the hook is asked is a line there
-      if (process.env.FAKE_MODELS_LOG) (await import("node:fs")).appendFileSync(process.env.FAKE_MODELS_LOG, "asked\n")
+      if (process.env.FAKE_MODELS_LOG) (await import("node:fs")).appendFileSync(process.env.FAKE_MODELS_LOG, "asked " + (auth?.refresh ?? auth?.key ?? "-") + "\n")
       if (auth?.refresh === "r-dead" || auth?.key === "dead") throw new Error("the vendor refused the sign-in")
       if (auth?.refresh === "r-models-gone") throw Object.assign(new Error("the vendor refused the sign-in"), { signIn: "expired" })
       // a sign-in past its time, said in words only, as Grok's plugin says it
@@ -391,8 +419,12 @@ export const FakePlugin = async ({ client }) => ({
         await client.auth.set({ path: { id: ID }, body: { ...auth, refresh: auth.refresh + "+" } })
       }
       // fake-1 costs the plan nothing, as a WorkBuddy model of x0.00
-      // credits ($FAKE_NO_FREE: a list with no free model, as ZCode's is)
+      // credits ($FAKE_NO_FREE: a list with no free model, as ZCode's was
+      // before 0.1.58 and a coding-plan-only account's is)
       if (!process.env.FAKE_NO_FREE) p.models["fake-1"].free = true
+      // $FAKE_ZCODE_FREE: the Start Plan's trial entries marked free, as
+      // zcode 0.1.58 on lists them (plugins#438)
+      if (process.env.FAKE_ZCODE_FREE) for (const id of ["GLM-5.3-Flash-Trial", "GLM-5.3-Trial"]) if (p.models[id]) p.models[id].free = true
       // fake-claude's credits are a number, discounted; fake-gemini's as
       // WorkBuddy's picker writes them
       if (p.models["fake-claude"]) Object.assign(p.models["fake-claude"], { rate: 0.5, rateWas: 1 })
