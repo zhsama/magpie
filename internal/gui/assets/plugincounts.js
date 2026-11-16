@@ -42,6 +42,8 @@
     },
     // the like on a plugin's page; installed says whether it may be given
     like(k, installed) {
+      // this build sends no likes: it keeps no install id (internal/stats)
+      return null;
       const b = el("button", "pm-like");
       b.type = "button";
       let busy = false;
