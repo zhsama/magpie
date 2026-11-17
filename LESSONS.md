@@ -398,9 +398,10 @@ rate and at its largest input.**
   on the largest reply a test has.
 - Seen 2× (2026-10-14, 2026-10-18).
 
-**A new route or setting runs the packages whose guards list them.**
-TestEveryRouteHasACommandOrIsNamed (internal/cli) lists every route, and
-TestSettingsSaveKeepsWhatItDoesNotSend (internal/gui) every setting.
+**A new route, setting or agent runs the packages whose guards list
+them.** TestEveryRouteHasACommandOrIsNamed (internal/cli) lists every
+route, TestSettingsSaveKeepsWhatItDoesNotSend (internal/gui) every
+setting, and TestEveryAgentInLibrary (internal/library) every agent.
 - 11-11: 747632890 (context-cap) and eb56de0b5 (the catalog's model list)
   ran chosen tests and turned both guards red on CI at 8aae124b0. An hour
   later 58fb07095 (named proxies, 1,714 lines) did it again with three
@@ -416,7 +417,16 @@ TestSettingsSaveKeepsWhatItDoesNotSend (internal/gui) every setting.
   TestEveryRouteIsNamedForTheCLI fails on a route that the CLI's list
   doesn't name. When a rule keeps being missed, put its check where
   the work already runs.
-- Seen 2× (2026-11-11, 2026-11-15).
+- 11-17: 00b2c11a6 (Open Code Review) added an agent and ran chosen
+  internal/agent tests, a real ocr review and both cross-OS vets, but
+  pushed before its full suite. The suite then found
+  TestEveryAgentInLibrary red, and effdd1beb added the noLibrary line
+  half an hour later. That guard was red on main for a new agent on
+  11-10 twice (399010bef, 68cb92e8e), 11-12 (7e8214d60) and now. The
+  check now also runs where agents are added: internal/agent's
+  TestEveryAgentNamedForTheLibrary fails on an agent that targetOf's
+  cases and noLibrary both leave unnamed.
+- Seen 3× (2026-11-11, 2026-11-15, 2026-11-17).
 
 **A byte-for-byte check of a stream allows what the protocol allows,
 and its failure message counts against what it compared.**
@@ -671,6 +681,26 @@ Two habits from them:
   TestProviderListReadsSettingsOnce's 2s bar, now a count of parses
   (a36319d60), and TestCursorEditorCopiedOncePerChange's 100ms linger
   (2efb71ea0).
+
+**What a started process's reader goes by is set before the process
+starts, not after the call that started it returns.**
+- #6887 (11-16): claudetui's shim began holding a reply only once send
+  woke up after the transcript reader counted the row, and the reader
+  wrote the row out first. TestShimCutMessageIsUnpastable, added by
+  efb62fe90 (community), went red on CI three runs in a row before
+  anyone took it. A 50ms sleep before the check turned it red 3 of 3
+  with CI's output; 4c6c3a453 begins the hold on the reader's side.
+- 11-17: the Claude bridge set a run's tools after `start` returned,
+  while Claude Code was already running and its output was being read.
+  On a loaded ubuntu runner the first tool_use was read with no tools
+  set, and a deferred MCP tool was handed over cut
+  (TestClaudeBridgeHandsOverAnUnloadedMagpieTool, run 43919594403).
+  A 50ms sleep before the assignment reproduced it 3 of 3; 43d9aae09
+  sets them before launch.
+- For each field a goroutine reads, ask which goroutine writes it and
+  whether the reader can run first. "Green 30 of 30 locally" is no
+  answer; inject the delay.
+- Seen 1× (2026-11-17).
 
 **A helper that gives a test a new HOME also stops what an earlier test
 started under the old one.**
@@ -934,6 +964,14 @@ cause:
     on llms-full.txt and on public/search/*.json, the index b70c45048
     added on 11-15 (fixed in f5f27070a). Docs pages now feed two
     generated files: run `node search-index.mjs` too.
+    11-16 dbbb2f26b (fixed in 9d5d8baf2) and 11-17 00b2c11a6 (a new
+    agent's docs row, cli (linux/amd64) red at 2f25728dd, fixed in
+    f7e0c2763) did the same: five times in five days, each by a Go
+    change that also touched a docs page and ran only Go tests. Now in
+    the code standards' criterion 3.
+    Then testenv got the check: every package's run fails while a docs
+    page differs from site/docs-index.sums, which either generator now
+    writes with both files.
   - 10-28: of main's last 58 Test runs, 49 were cancelled by the next
     push. 0b99b8fbe's new allocation bound went red in macOS's Race job
     (sync.Pool lets go under -race) at 25df3187b, the first run after it
@@ -1667,6 +1705,11 @@ each one.
     request (#6688, cd030691a). 0b8c4bfc3's new field left
     TestEveryWordHasZh red (e9fcc6229). A change that adds a route or a
     label runs internal/cli, internal/gateway and internal/tui whole.
+    11-17: 618bfc1a9 gave Kimi Code a "subagent pool" field and ran
+    internal/agent and internal/gui only (both machines were loaded),
+    so TestEveryWordHasZh was red again (fixed in the commit after
+    it). internal/agent's TestEveryFieldLabelHasTUIZh now fails on such
+    a label in the package the change runs.
   - A red with an issue still needs an owner. #6677 was red on main for
     about three hours. A session that met it commented "Not taking it"
     and shipped past it, and the review fixed it in 4c86b0ab4. The four
