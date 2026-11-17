@@ -148,7 +148,8 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           BUILD: ${{ needs.meta.outputs.build }}
-          IMAGE: ghcr.io/zhsama/magpie
+          # this repo's own package: a workflow token can push to no other
+          IMAGE: ghcr.io/${{ github.repository }}
         run: |
           set -euo pipefail
           docker build --build-arg "VERSION=$BUILD" \
@@ -177,6 +178,7 @@ jobs:
           VERSION: v${{ inputs.version }}
           BUILD: ${{ needs.meta.outputs.build }}
           SHA: ${{ needs.meta.outputs.sha }}
+          IMAGE: ghcr.io/${{ github.repository }}
         run: |
           set -euo pipefail
           cd dist
@@ -184,5 +186,5 @@ jobs:
           notes=$(printf '%s\n' \
             "Fork of yetone/magpie at $VERSION, with the daily PostHog count removed. Built as $BUILD." \
             "The macOS app is unsigned and arm64 only." \
-            "Server image: ghcr.io/zhsama/magpie:${VERSION#v} (linux/amd64).")
+            "Server image: $IMAGE:${VERSION#v} (linux/amd64).")
           gh release create "$VERSION" --target "$SHA" --title "magpie $VERSION" --notes "$notes" ./*
